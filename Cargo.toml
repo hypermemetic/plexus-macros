@@ -1,0 +1,24 @@
+[package]
+name = "hub-macro"
+version = "0.1.0"
+edition = "2021"
+description = "Proc macros for hub method definitions with session types"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
+
+[dev-dependencies]
+substrate = { path = "../substrate" }
+dialectic = { version = "0.4.1", features = ["tokio"] }
+schemars = { version = "1.0.4", features = ["derive", "uuid1"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+trybuild = "1.0"
+
+[patch.crates-io]
+semantic-query = { path = "../semantic-query" }
