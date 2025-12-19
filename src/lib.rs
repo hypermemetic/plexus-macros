@@ -5,35 +5,43 @@
 //! # Example
 //!
 //! ```ignore
-//! use hub_macro::hub_method;
+//! use hub_macro::{hub_methods, hub_method};
 //!
-//! /// Execute a bash command
-//! #[hub_method]
-//! async fn execute(input: ExecuteInput) -> Recv<BashEvent, Done> {
-//!     // implementation
+//! #[hub_methods(namespace = "bash", version = "1.0.0")]
+//! impl Bash {
+//!     /// Execute a bash command
+//!     #[hub_method]
+//!     async fn execute(&self, command: String) -> impl Stream<Item = BashEvent> {
+//!         // implementation
+//!     }
 //! }
 //! ```
 //!
 //! The macro extracts:
 //! - Method name from function name
 //! - Description from doc comments
-//! - Input schema from parameter type
-//! - Protocol schema from return type
+//! - Input schema from parameter types
+//! - Return type schema from Stream Item type
 
+mod codegen;
+mod parse;
+mod stream_event;
+
+use codegen::generate_all;
+use parse::HubMethodsAttrs;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
     parse::{Parse, ParseStream},
-    parse_macro_input, punctuated::Punctuated, Expr, ExprLit, FnArg, ItemFn, Lit, Meta,
+    parse_macro_input, punctuated::Punctuated, Expr, ExprLit, FnArg, ItemFn, ItemImpl, Lit, Meta,
     MetaNameValue, Pat, ReturnType, Token, Type,
 };
 
-/// Parsed attributes for hub_method
+/// Parsed attributes for hub_method (standalone version)
 struct HubMethodAttrs {
     name: Option<String>,
     /// Base crate path for imports (default: "crate")
-    /// Use "substrate" when testing from outside the crate
     crate_path: String,
 }
 
@@ -70,29 +78,21 @@ impl Parse for HubMethodAttrs {
     }
 }
 
-/// Attribute macro for hub methods.
+/// Attribute macro for hub methods within an impl block.
 ///
-/// Extracts schema information from the function signature and generates
-/// registration code.
-///
-/// # Attributes
-///
-/// - `name = "custom_name"` - Override the method name (default: function name)
+/// This is used inside a `#[hub_methods]` impl block to mark individual methods.
+/// When used standalone, it generates a schema function.
 ///
 /// # Example
 ///
 /// ```ignore
-/// /// Execute a bash command and stream output
-/// #[hub_method]
-/// async fn execute(input: ExecuteInput) -> Session![
-///     loop {
-///         choose {
-///             0 => { send BashEvent; continue; },
-///             1 => { send ExitCode; break; },
-///         }
+/// #[hub_methods(namespace = "bash")]
+/// impl Bash {
+///     /// Execute a bash command
+///     #[hub_method]
+///     async fn execute(&self, command: String) -> impl Stream<Item = BashEvent> {
+///         // ...
 ///     }
-/// ] {
-///     // ...
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -118,7 +118,7 @@ fn hub_method_impl(args: HubMethodAttrs, input_fn: ItemFn) -> syn::Result<TokenS
     // Extract input type from first parameter (if any)
     let input_type = extract_input_type(&input_fn)?;
 
-    // Extract return type (the session protocol)
+    // Extract return type
     let return_type = extract_return_type(&input_fn)?;
 
     // Function name for the schema function
@@ -172,7 +172,7 @@ fn extract_input_type(input_fn: &ItemFn) -> syn::Result<Option<Type>> {
         match arg {
             FnArg::Receiver(_) => continue, // Skip &self
             FnArg::Typed(pat_type) => {
-                // Skip context-like parameters (could be configurable)
+                // Skip context-like parameters
                 if let Pat::Ident(ident) = &*pat_type.pat {
                     let name = ident.ident.to_string();
                     if name == "ctx" || name == "context" || name == "self_" {
@@ -184,14 +184,14 @@ fn extract_input_type(input_fn: &ItemFn) -> syn::Result<Option<Type>> {
         }
     }
 
-    Ok(None) // No input parameter
+    Ok(None)
 }
 
 fn extract_return_type(input_fn: &ItemFn) -> syn::Result<Type> {
     match &input_fn.sig.output {
         ReturnType::Default => Err(syn::Error::new_spanned(
             &input_fn.sig,
-            "hub_method requires a return type (the session protocol)",
+            "hub_method requires a return type",
         )),
         ReturnType::Type(_, ty) => Ok((*ty.clone()).clone()),
     }
@@ -213,55 +213,82 @@ fn generate_schema_fn(
         quote! { None }
     };
 
-    // The return type is the server's protocol after receiving input
-    // Full server protocol: if input exists, Recv<Input, ReturnType>, else just ReturnType
-    let server_protocol = if input_type.is_some() {
-        quote! {
-            {
-                let input_schema = #input_schema;
-                let continuation = <#return_type as SessionSchema>::schema();
-                ProtocolSchema::Recv {
-                    payload: input_schema.unwrap(),
-                    then: Box::new(continuation),
-                }
-            }
-        }
-    } else {
-        quote! {
-            <#return_type as SessionSchema>::schema()
-        }
-    };
-
-    // Client protocol is the dual
-    let client_protocol = if input_type.is_some() {
-        quote! {
-            {
-                let input_schema = #input_schema;
-                // Client sends input, then does dual of return type
-                let continuation = <<#return_type as dialectic::Session>::Dual as SessionSchema>::schema();
-                ProtocolSchema::Send {
-                    payload: input_schema.unwrap(),
-                    then: Box::new(continuation),
-                }
-            }
-        }
-    } else {
-        quote! {
-            <<#return_type as dialectic::Session>::Dual as SessionSchema>::schema()
-        }
-    };
+    let _ = return_type; // Will be used for protocol schema in future
+    let _ = crate_path;
 
     quote! {
         /// Generated schema function for this hub method
-        pub fn #fn_name() -> #crate_path::plexus::MethodSchema {
-            use #crate_path::plexus::{MethodSchema, ProtocolSchema, SessionSchema};
-
-            MethodSchema {
-                name: #method_name.to_string(),
-                description: #description.to_string(),
-                protocol: #client_protocol,
-                server_protocol: #server_protocol,
-            }
+        #[allow(dead_code)]
+        pub fn #fn_name() -> serde_json::Value {
+            serde_json::json!({
+                "name": #method_name,
+                "description": #description,
+                "input": #input_schema,
+            })
         }
     }
+}
+
+/// Attribute macro for impl blocks containing hub methods.
+///
+/// Generates:
+/// - Method enum for schema extraction
+/// - Activation trait implementation
+/// - RPC server trait and implementation
+///
+/// # Attributes
+///
+/// - `namespace = "..."` (required) - The activation namespace
+/// - `version = "..."` (optional, default: "1.0.0") - Version string
+/// - `description = "..."` (optional) - Activation description
+/// - `crate_path = "..."` (optional, default: "crate") - Path to substrate crate
+///
+/// # Example
+///
+/// ```ignore
+/// #[hub_methods(namespace = "bash", version = "1.0.0", description = "Execute bash commands")]
+/// impl Bash {
+///     /// Execute a bash command and stream output
+///     #[hub_method]
+///     async fn execute(&self, command: String) -> impl Stream<Item = BashEvent> + Send + 'static {
+///         self.executor.execute(&command).await
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn hub_methods(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as HubMethodsAttrs);
+    let input_impl = parse_macro_input!(item as ItemImpl);
+
+    match generate_all(args, input_impl) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// Derive macro for stream event types.
+///
+/// Generates the `ActivationStreamItem` trait implementation for enum types
+/// that represent streaming events from an activation.
+///
+/// # Attributes
+///
+/// - `#[stream_event(content_type = "...")]` - Sets the content type for the event
+/// - `#[terminal]` - Marks a variant as terminal (stream ends after this event)
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(StreamEvent)]
+/// #[stream_event(content_type = "bash.event")]
+/// pub enum BashEvent {
+///     Stdout(String),
+///     Stderr(String),
+///     #[terminal]
+///     Exit(i32),
+/// }
+/// ```
+#[proc_macro_derive(StreamEvent, attributes(stream_event, terminal))]
+pub fn stream_event_derive(input: TokenStream) -> TokenStream {
+    stream_event::derive(input)
 }
