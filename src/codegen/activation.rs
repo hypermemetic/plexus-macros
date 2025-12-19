@@ -13,7 +13,6 @@ pub fn generate(
     crate_path: &syn::Path,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
-    let schema_name = format_ident!("{}Schema", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
     let rpc_server_name = format_ident!("{}RpcServer", struct_name);
     let method_names: Vec<&str> = methods.iter().map(|m| m.method_name.as_str()).collect();
@@ -82,14 +81,7 @@ pub fn generate(
                     namespace: #namespace.to_string(),
                     version: #version.to_string(),
                     description: #description.to_string(),
-                    methods: #schema_name::generate().methods.into_iter().map(|m| {
-                        #crate_path::plexus::MethodSchemaInfo {
-                            name: m.name,
-                            description: m.description,
-                            params: m.params,
-                            returns: m.returns,
-                        }
-                    }).collect(),
+                    methods: #enum_name::method_schemas(),
                 }
             }
         }
