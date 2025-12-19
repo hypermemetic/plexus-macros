@@ -26,10 +26,17 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                 _ => {
                     // Use struct variant for all cases (including single param)
                     // This produces proper object schema with field names
+                    // Add description for each field based on parameter name
                     let fields: Vec<TokenStream> = m
                         .params
                         .iter()
-                        .map(|(name, ty)| quote! { #name: #ty })
+                        .map(|(name, ty)| {
+                            let desc = format!("The {} parameter", name);
+                            quote! {
+                                #[schemars(description = #desc)]
+                                #name: #ty
+                            }
+                        })
                         .collect();
                     quote! {
                         #[doc = #doc]
@@ -106,10 +113,15 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                     .zip(return_schemas.into_iter())
                     .enumerate()
                     .map(|(i, ((name, desc), returns))| {
-                        // Get this variant's schema from oneOf
-                        let variant_schema = one_of.get(i).cloned();
-                        let params = variant_schema.and_then(|v| {
-                            serde_json::from_value::<schemars::Schema>(v).ok()
+                        // Get this variant's schema from oneOf, then extract just the "params" portion
+                        // The variant looks like: { properties: { method: {...}, params: {...} }, ... }
+                        // We want just the params schema
+                        let params = one_of.get(i).and_then(|variant| {
+                            variant
+                                .get("properties")
+                                .and_then(|props| props.get("params"))
+                                .cloned()
+                                .and_then(|p| serde_json::from_value::<schemars::Schema>(p).ok())
                         });
 
                         #crate_path::plexus::MethodSchemaInfo {
