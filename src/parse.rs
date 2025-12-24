@@ -62,6 +62,8 @@ pub struct HubMethodsAttrs {
     pub version: String,
     pub description: Option<String>,
     pub crate_path: String,
+    /// If true, generate resolve_handle that delegates to self.resolve_handle_impl()
+    pub resolve_handle: bool,
 }
 
 impl Parse for HubMethodsAttrs {
@@ -70,23 +72,33 @@ impl Parse for HubMethodsAttrs {
         let mut version = "1.0.0".to_string();
         let mut description = None;
         let mut crate_path = "crate".to_string();
+        let mut resolve_handle = false;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
 
             for meta in metas {
-                if let Meta::NameValue(MetaNameValue { path, value, .. }) = meta {
-                    if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
-                        if path.is_ident("namespace") {
-                            namespace = s.value();
-                        } else if path.is_ident("version") {
-                            version = s.value();
-                        } else if path.is_ident("description") {
-                            description = Some(s.value());
-                        } else if path.is_ident("crate_path") {
-                            crate_path = s.value();
+                match meta {
+                    Meta::NameValue(MetaNameValue { path, value, .. }) => {
+                        if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
+                            if path.is_ident("namespace") {
+                                namespace = s.value();
+                            } else if path.is_ident("version") {
+                                version = s.value();
+                            } else if path.is_ident("description") {
+                                description = Some(s.value());
+                            } else if path.is_ident("crate_path") {
+                                crate_path = s.value();
+                            }
                         }
                     }
+                    Meta::Path(path) => {
+                        // Handle bare flags like `resolve_handle`
+                        if path.is_ident("resolve_handle") {
+                            resolve_handle = true;
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -98,7 +110,7 @@ impl Parse for HubMethodsAttrs {
             ));
         }
 
-        Ok(HubMethodsAttrs { namespace, version, description, crate_path })
+        Ok(HubMethodsAttrs { namespace, version, description, crate_path, resolve_handle })
     }
 }
 

@@ -11,6 +11,7 @@ pub fn generate(
     description: &str,
     methods: &[MethodInfo],
     crate_path: &syn::Path,
+    resolve_handle: bool,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
@@ -21,6 +22,20 @@ pub fn generate(
     let help_arms = generate_help_arms(methods);
     let rpc_trait_methods = generate_rpc_trait_methods(methods);
     let rpc_impl_methods = generate_rpc_impl_methods(struct_name, methods, namespace, crate_path);
+
+    // Conditionally generate resolve_handle method
+    let resolve_handle_impl = if resolve_handle {
+        quote! {
+            async fn resolve_handle(
+                &self,
+                handle: &#crate_path::activations::arbor::Handle,
+            ) -> Result<#crate_path::plexus::PlexusStream, #crate_path::plexus::PlexusError> {
+                self.resolve_handle_impl(handle).await
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     quote! {
         impl #struct_name {
@@ -84,6 +99,8 @@ pub fn generate(
                     methods: #enum_name::method_schemas(),
                 }
             }
+
+            #resolve_handle_impl
         }
     }
 }
