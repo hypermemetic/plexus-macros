@@ -100,7 +100,11 @@ fn generate_rpc_trait_methods(methods: &[MethodInfo]) -> Vec<TokenStream> {
             let params: Vec<TokenStream> = m
                 .params
                 .iter()
-                .map(|(name, ty)| quote! { #name: #ty })
+                .map(|p| {
+                    let name = &p.name;
+                    let ty = &p.ty;
+                    quote! { #name: #ty }
+                })
                 .collect();
 
             quote! {
@@ -123,12 +127,16 @@ fn generate_rpc_impl_methods(
         .iter()
         .map(|m| {
             let method_name = &m.fn_name;
-            let param_names: Vec<&syn::Ident> = m.params.iter().map(|(n, _)| n).collect();
+            let param_names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
 
             let params_with_types: Vec<TokenStream> = m
                 .params
                 .iter()
-                .map(|(name, ty)| quote! { #name: #ty })
+                .map(|p| {
+                    let name = &p.name;
+                    let ty = &p.ty;
+                    quote! { #name: #ty }
+                })
                 .collect();
 
             // Call the method directly and convert stream to subscription
@@ -170,7 +178,8 @@ fn generate_dispatch_arms(
                     }
                 },
                 1 => {
-                    let (param_name, _) = &m.params[0];
+                    let param = &m.params[0];
+                    let param_name = &param.name;
                     let param_str = param_name.to_string();
                     quote! {
                         #method_name => {
@@ -197,7 +206,8 @@ fn generate_dispatch_arms(
                     let extractions: Vec<TokenStream> = m
                         .params
                         .iter()
-                        .map(|(name, _)| {
+                        .map(|p| {
+                            let name = &p.name;
                             let name_str = name.to_string();
                             quote! {
                                 let #name = map.get(#name_str)
@@ -209,7 +219,7 @@ fn generate_dispatch_arms(
                             }
                         })
                         .collect();
-                    let param_names: Vec<&syn::Ident> = m.params.iter().map(|(n, _)| n).collect();
+                    let param_names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
 
                     quote! {
                         #method_name => {

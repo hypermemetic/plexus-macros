@@ -1,35 +1,58 @@
 //! Attribute parsing for hub macros
 
+use std::collections::HashMap;
 use syn::{
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
-    Expr, ExprLit, FnArg, GenericArgument, ImplItemFn, Lit, Meta, MetaNameValue, Pat,
+    Expr, ExprLit, FnArg, GenericArgument, ImplItemFn, Lit, Meta, MetaList, MetaNameValue, Pat,
     PathArguments, ReturnType, Token, Type,
 };
 
 /// Parsed attributes for #[hub_method]
 pub struct HubMethodAttrs {
     pub name: Option<String>,
+    /// Parameter descriptions: param_name -> description
+    pub param_docs: HashMap<String, String>,
 }
 
 impl Parse for HubMethodAttrs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut name = None;
+        let mut param_docs = HashMap::new();
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
             for meta in metas {
-                if let Meta::NameValue(MetaNameValue { path, value, .. }) = meta {
-                    if path.is_ident("name") {
-                        if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
-                            name = Some(s.value());
+                match meta {
+                    Meta::NameValue(MetaNameValue { path, value, .. }) => {
+                        if path.is_ident("name") {
+                            if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
+                                name = Some(s.value());
+                            }
                         }
                     }
+                    Meta::List(MetaList { path, tokens, .. }) => {
+                        if path.is_ident("params") {
+                            // Parse params(name = "desc", other = "desc2")
+                            let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
+                            let nested = syn::parse::Parser::parse2(parser, tokens.clone())?;
+                            for meta in nested {
+                                if let Meta::NameValue(MetaNameValue { path, value, .. }) = meta {
+                                    if let Some(ident) = path.get_ident() {
+                                        if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
+                                            param_docs.insert(ident.to_string(), s.value());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
-        Ok(HubMethodAttrs { name })
+        Ok(HubMethodAttrs { name, param_docs })
     }
 }
 
@@ -79,29 +102,35 @@ impl Parse for HubMethodsAttrs {
     }
 }
 
+/// Parameter info with optional description
+pub struct ParamInfo {
+    pub name: syn::Ident,
+    pub ty: Type,
+    pub description: Option<String>,
+}
+
 /// Information extracted from a #[hub_method] function
 pub struct MethodInfo {
     pub fn_name: syn::Ident,
     pub method_name: String,
     pub description: String,
-    pub params: Vec<(syn::Ident, Type)>,
+    pub params: Vec<ParamInfo>,
     pub return_type: Type,
     pub stream_item_type: Option<Type>,
-    pub doc_attrs: Vec<syn::Attribute>,
 }
 
 impl MethodInfo {
-    /// Extract method info from an impl function
-    pub fn from_fn(method: &ImplItemFn) -> syn::Result<Self> {
+    /// Extract method info from an impl function with optional hub_method attrs
+    pub fn from_fn(method: &ImplItemFn, hub_method_attrs: Option<&HubMethodAttrs>) -> syn::Result<Self> {
         let fn_name = method.sig.ident.clone();
-        let method_name = fn_name.to_string();
+        let method_name = hub_method_attrs
+            .and_then(|a| a.name.clone())
+            .unwrap_or_else(|| fn_name.to_string());
 
         // Extract doc attributes and description
         let mut doc_lines = Vec::new();
-        let mut doc_attrs = Vec::new();
         for attr in &method.attrs {
             if attr.path().is_ident("doc") {
-                doc_attrs.push(attr.clone());
                 if let Meta::NameValue(MetaNameValue { value, .. }) = &attr.meta {
                     if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
                         doc_lines.push(s.value().trim().to_string());
@@ -111,12 +140,25 @@ impl MethodInfo {
         }
         let description = doc_lines.join(" ");
 
+        // Get param docs from hub_method attrs
+        let param_docs = hub_method_attrs
+            .map(|a| &a.param_docs)
+            .cloned()
+            .unwrap_or_default();
+
         // Extract parameters after &self
         let mut params = Vec::new();
         for arg in &method.sig.inputs {
             if let FnArg::Typed(pat_type) = arg {
                 if let Pat::Ident(ident) = &*pat_type.pat {
-                    params.push((ident.ident.clone(), (*pat_type.ty).clone()));
+                    let name = ident.ident.clone();
+                    let name_str = name.to_string();
+                    let description = param_docs.get(&name_str).cloned();
+                    params.push(ParamInfo {
+                        name,
+                        ty: (*pat_type.ty).clone(),
+                        description,
+                    });
                 }
             }
         }
@@ -141,7 +183,6 @@ impl MethodInfo {
             params,
             return_type,
             stream_item_type,
-            doc_attrs,
         })
     }
 }

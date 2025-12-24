@@ -26,12 +26,15 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                 _ => {
                     // Use struct variant for all cases (including single param)
                     // This produces proper object schema with field names
-                    // Add description for each field based on parameter name
+                    // Add description for each field from param_docs or fallback to name
                     let fields: Vec<TokenStream> = m
                         .params
                         .iter()
-                        .map(|(name, ty)| {
-                            let desc = format!("The {} parameter", name);
+                        .map(|p| {
+                            let name = &p.name;
+                            let ty = &p.ty;
+                            let desc = p.description.clone()
+                                .unwrap_or_else(|| format!("The {} parameter", name));
                             quote! {
                                 #[schemars(description = #desc)]
                                 #name: #ty

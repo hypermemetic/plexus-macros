@@ -3,10 +3,10 @@
 mod activation;
 mod method_enum;
 
-use crate::parse::{HubMethodsAttrs, MethodInfo};
+use crate::parse::{HubMethodAttrs, HubMethodsAttrs, MethodInfo};
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{ImplItem, ItemImpl, Type};
+use syn::{ImplItem, ItemImpl, Meta, Type};
 
 /// Generate all code from a #[hub_methods] impl block
 pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Result<TokenStream> {
@@ -36,8 +36,16 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             });
 
             if let Some(idx) = hub_method_idx {
-                method.attrs.remove(idx);
-                methods.push(MethodInfo::from_fn(method)?);
+                // Parse the attribute contents before removing
+                let attr = method.attrs.remove(idx);
+                let hub_method_attrs = match &attr.meta {
+                    Meta::Path(_) => None, // #[hub_method] with no args
+                    Meta::List(list) => {
+                        Some(syn::parse2::<HubMethodAttrs>(list.tokens.clone())?)
+                    }
+                    Meta::NameValue(_) => None,
+                };
+                methods.push(MethodInfo::from_fn(method, hub_method_attrs.as_ref())?);
             }
         }
     }
