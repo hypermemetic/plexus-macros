@@ -266,28 +266,26 @@ pub fn hub_methods(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Derive macro for stream event types.
+/// **DEPRECATED**: This derive macro is no longer needed.
 ///
-/// Generates the `ActivationStreamItem` trait implementation for enum types
-/// that represent streaming events from an activation.
-///
-/// # Attributes
-///
-/// - `#[stream_event(content_type = "...")]` - Sets the content type for the event
-/// - `#[terminal]` - Marks a variant as terminal (stream ends after this event)
-///
-/// # Example
+/// With the caller-wraps streaming architecture, event types no longer need to
+/// implement `ActivationStreamItem`. Just use plain domain types with standard
+/// derives:
 ///
 /// ```ignore
-/// #[derive(StreamEvent)]
-/// #[stream_event(content_type = "bash.event")]
-/// pub enum BashEvent {
-///     Stdout(String),
-///     Stderr(String),
-///     #[terminal]
-///     Exit(i32),
+/// #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// #[serde(tag = "event", rename_all = "snake_case")]
+/// pub enum MyEvent {
+///     Data { value: String },
+///     Complete { result: i32 },
 /// }
 /// ```
+///
+/// The wrapping happens at the call site via `wrap_stream()`.
+#[deprecated(
+    since = "0.2.0",
+    note = "No longer needed - use plain domain types with Serialize/Deserialize"
+)]
 #[proc_macro_derive(StreamEvent, attributes(stream_event, terminal))]
 pub fn stream_event_derive(input: TokenStream) -> TokenStream {
     stream_event::derive(input)

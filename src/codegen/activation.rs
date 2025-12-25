@@ -139,11 +139,11 @@ fn generate_rpc_impl_methods(
     namespace: &str,
     crate_path: &syn::Path,
 ) -> Vec<TokenStream> {
-    let _ = crate_path; // Will be used when we need crate-specific imports
     methods
         .iter()
         .map(|m| {
             let method_name = &m.fn_name;
+            let method_name_str = &m.method_name;
             let param_names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
 
             let params_with_types: Vec<TokenStream> = m
@@ -156,19 +156,48 @@ fn generate_rpc_impl_methods(
                 })
                 .collect();
 
-            // Call the method directly and convert stream to subscription
-            // Don't wrap in PlexusStream - the stream items implement ActivationStreamItem
+            // Content type format: "namespace.method"
+            let content_type = format!("{}.{}", namespace, method_name_str);
+
+            // Caller-wraps pattern: accept sink, wrap stream, forward items manually
             quote! {
                 async fn #method_name(
                     &self,
                     pending: jsonrpsee::PendingSubscriptionSink,
                     #(#params_with_types),*
                 ) -> jsonrpsee::core::SubscriptionResult {
-                    use #crate_path::plugin_system::conversion::IntoSubscription;
+                    use futures::StreamExt;
+
+                    let sink = pending.accept().await?;
                     let stream = #struct_name::#method_name(self, #(#param_names),*).await;
-                    let provenance = #crate_path::plexus::Provenance::root(#namespace);
-                    // Box::pin the stream to satisfy Unpin bound
-                    Box::pin(stream).into_subscription(pending, provenance).await
+                    let wrapped = #crate_path::plexus::wrap_stream(
+                        stream,
+                        #content_type,
+                        vec![#namespace.into()]
+                    );
+
+                    tokio::spawn(async move {
+                        let mut stream = wrapped;
+                        while let Some(item) = stream.next().await {
+                            if let Ok(raw_value) = serde_json::value::to_raw_value(&item) {
+                                if sink.send(raw_value).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        // Send done event
+                        let done = #crate_path::plexus::PlexusStreamItem::Done {
+                            metadata: #crate_path::plexus::StreamMetadata::new(
+                                vec![#namespace.into()],
+                                #crate_path::plexus::PlexusContext::hash(),
+                            ),
+                        };
+                        if let Ok(raw_value) = serde_json::value::to_raw_value(&done) {
+                            let _ = sink.send(raw_value).await;
+                        }
+                    });
+
+                    Ok(())
                 }
             }
         })
@@ -185,13 +214,18 @@ fn generate_dispatch_arms(
         .map(|m| {
             let method_name = &m.method_name;
             let fn_name = &m.fn_name;
+            // Content type format: "namespace.method"
+            let content_type = format!("{}.{}", namespace, method_name);
 
             match m.params.len() {
                 0 => quote! {
                     #method_name => {
                         let stream = self.#fn_name().await;
-                        let provenance = #crate_path::plexus::Provenance::root(#namespace);
-                        Ok(#crate_path::plexus::into_plexus_stream(stream, provenance))
+                        Ok(#crate_path::plexus::wrap_stream(
+                            stream,
+                            #content_type,
+                            vec![#namespace.into()]
+                        ))
                     }
                 },
                 1 => {
@@ -214,8 +248,11 @@ fn generate_dispatch_arms(
                                     .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?,
                             };
                             let stream = self.#fn_name(#param_name).await;
-                            let provenance = #crate_path::plexus::Provenance::root(#namespace);
-                            Ok(#crate_path::plexus::into_plexus_stream(stream, provenance))
+                            Ok(#crate_path::plexus::wrap_stream(
+                                stream,
+                                #content_type,
+                                vec![#namespace.into()]
+                            ))
                         }
                     }
                 }
@@ -246,8 +283,11 @@ fn generate_dispatch_arms(
                                 ))?;
                             #(#extractions)*
                             let stream = self.#fn_name(#(#param_names),*).await;
-                            let provenance = #crate_path::plexus::Provenance::root(#namespace);
-                            Ok(#crate_path::plexus::into_plexus_stream(stream, provenance))
+                            Ok(#crate_path::plexus::wrap_stream(
+                                stream,
+                                #content_type,
+                                vec![#namespace.into()]
+                            ))
                         }
                     }
                 }
