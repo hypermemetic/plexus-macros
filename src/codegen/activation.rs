@@ -156,48 +156,104 @@ fn generate_rpc_impl_methods(
                 })
                 .collect();
 
-            // Content type format: "namespace.method"
-            let content_type = format!("{}.{}", namespace, method_name_str);
+            if m.is_override {
+                // Override method: returns Result<PlexusStream, _> directly
+                // Forward the stream without additional wrapping
+                quote! {
+                    async fn #method_name(
+                        &self,
+                        pending: jsonrpsee::PendingSubscriptionSink,
+                        #(#params_with_types),*
+                    ) -> jsonrpsee::core::SubscriptionResult {
+                        use futures::StreamExt;
 
-            // Caller-wraps pattern: accept sink, wrap stream, forward items manually
-            quote! {
-                async fn #method_name(
-                    &self,
-                    pending: jsonrpsee::PendingSubscriptionSink,
-                    #(#params_with_types),*
-                ) -> jsonrpsee::core::SubscriptionResult {
-                    use futures::StreamExt;
+                        let sink = pending.accept().await?;
+                        let stream_result = #struct_name::#method_name(self, #(#param_names),*).await;
 
-                    let sink = pending.accept().await?;
-                    let stream = #struct_name::#method_name(self, #(#param_names),*).await;
-                    let wrapped = #crate_path::plexus::wrap_stream(
-                        stream,
-                        #content_type,
-                        vec![#namespace.into()]
-                    );
-
-                    tokio::spawn(async move {
-                        let mut stream = wrapped;
-                        while let Some(item) = stream.next().await {
-                            if let Ok(raw_value) = serde_json::value::to_raw_value(&item) {
-                                if sink.send(raw_value).await.is_err() {
-                                    break;
+                        tokio::spawn(async move {
+                            match stream_result {
+                                Ok(mut stream) => {
+                                    while let Some(item) = stream.next().await {
+                                        if let Ok(raw_value) = serde_json::value::to_raw_value(&item) {
+                                            if sink.send(raw_value).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let error = #crate_path::plexus::PlexusStreamItem::Error {
+                                        metadata: #crate_path::plexus::StreamMetadata::new(
+                                            vec![#namespace.into()],
+                                            #crate_path::plexus::PlexusContext::hash(),
+                                        ),
+                                        message: e.to_string(),
+                                        code: None,
+                                        recoverable: false,
+                                    };
+                                    if let Ok(raw_value) = serde_json::value::to_raw_value(&error) {
+                                        let _ = sink.send(raw_value).await;
+                                    }
                                 }
                             }
-                        }
-                        // Send done event
-                        let done = #crate_path::plexus::PlexusStreamItem::Done {
-                            metadata: #crate_path::plexus::StreamMetadata::new(
-                                vec![#namespace.into()],
-                                #crate_path::plexus::PlexusContext::hash(),
-                            ),
-                        };
-                        if let Ok(raw_value) = serde_json::value::to_raw_value(&done) {
-                            let _ = sink.send(raw_value).await;
-                        }
-                    });
+                            // Send done event
+                            let done = #crate_path::plexus::PlexusStreamItem::Done {
+                                metadata: #crate_path::plexus::StreamMetadata::new(
+                                    vec![#namespace.into()],
+                                    #crate_path::plexus::PlexusContext::hash(),
+                                ),
+                            };
+                            if let Ok(raw_value) = serde_json::value::to_raw_value(&done) {
+                                let _ = sink.send(raw_value).await;
+                            }
+                        });
 
-                    Ok(())
+                        Ok(())
+                    }
+                }
+            } else {
+                // Normal method: wrap with wrap_stream
+                let content_type = format!("{}.{}", namespace, method_name_str);
+
+                quote! {
+                    async fn #method_name(
+                        &self,
+                        pending: jsonrpsee::PendingSubscriptionSink,
+                        #(#params_with_types),*
+                    ) -> jsonrpsee::core::SubscriptionResult {
+                        use futures::StreamExt;
+
+                        let sink = pending.accept().await?;
+                        let stream = #struct_name::#method_name(self, #(#param_names),*).await;
+                        let wrapped = #crate_path::plexus::wrap_stream(
+                            stream,
+                            #content_type,
+                            vec![#namespace.into()]
+                        );
+
+                        tokio::spawn(async move {
+                            let mut stream = wrapped;
+                            while let Some(item) = stream.next().await {
+                                if let Ok(raw_value) = serde_json::value::to_raw_value(&item) {
+                                    if sink.send(raw_value).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            // Send done event
+                            let done = #crate_path::plexus::PlexusStreamItem::Done {
+                                metadata: #crate_path::plexus::StreamMetadata::new(
+                                    vec![#namespace.into()],
+                                    #crate_path::plexus::PlexusContext::hash(),
+                                ),
+                            };
+                            if let Ok(raw_value) = serde_json::value::to_raw_value(&done) {
+                                let _ = sink.send(raw_value).await;
+                            }
+                        });
+
+                        Ok(())
+                    }
                 }
             }
         })
@@ -214,86 +270,92 @@ fn generate_dispatch_arms(
         .map(|m| {
             let method_name = &m.method_name;
             let fn_name = &m.fn_name;
-            // Content type format: "namespace.method"
-            let content_type = format!("{}.{}", namespace, method_name);
 
-            match m.params.len() {
-                0 => quote! {
+            // Generate param extraction code
+            let (param_extraction, param_names) = generate_param_extraction(m, crate_path);
+
+            if m.is_override {
+                // Override method: call directly, return Result<PlexusStream, _> as-is
+                quote! {
                     #method_name => {
-                        let stream = self.#fn_name().await;
+                        #param_extraction
+                        self.#fn_name(#(#param_names),*).await
+                    }
+                }
+            } else {
+                // Normal method: wrap with wrap_stream
+                let content_type = format!("{}.{}", namespace, method_name);
+                quote! {
+                    #method_name => {
+                        #param_extraction
+                        let stream = self.#fn_name(#(#param_names),*).await;
                         Ok(#crate_path::plexus::wrap_stream(
                             stream,
                             #content_type,
                             vec![#namespace.into()]
                         ))
                     }
-                },
-                1 => {
-                    let param = &m.params[0];
-                    let param_name = &param.name;
-                    let param_str = param_name.to_string();
-                    quote! {
-                        #method_name => {
-                            let #param_name = match &params {
-                                serde_json::Value::Object(map) => {
-                                    if let Some(val) = map.get(#param_str) {
-                                        serde_json::from_value(val.clone())
-                                            .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
-                                    } else {
-                                        serde_json::from_value(params.clone())
-                                            .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
-                                    }
-                                }
-                                _ => serde_json::from_value(params.clone())
-                                    .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?,
-                            };
-                            let stream = self.#fn_name(#param_name).await;
-                            Ok(#crate_path::plexus::wrap_stream(
-                                stream,
-                                #content_type,
-                                vec![#namespace.into()]
-                            ))
-                        }
-                    }
-                }
-                _ => {
-                    let extractions: Vec<TokenStream> = m
-                        .params
-                        .iter()
-                        .map(|p| {
-                            let name = &p.name;
-                            let name_str = name.to_string();
-                            quote! {
-                                let #name = map.get(#name_str)
-                                    .ok_or_else(|| #crate_path::plexus::PlexusError::InvalidParams(
-                                        format!("missing field: {}", #name_str)
-                                    ))
-                                    .and_then(|v| serde_json::from_value(v.clone())
-                                        .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string())))?;
-                            }
-                        })
-                        .collect();
-                    let param_names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
-
-                    quote! {
-                        #method_name => {
-                            let map = params.as_object()
-                                .ok_or_else(|| #crate_path::plexus::PlexusError::InvalidParams(
-                                    "expected object".to_string()
-                                ))?;
-                            #(#extractions)*
-                            let stream = self.#fn_name(#(#param_names),*).await;
-                            Ok(#crate_path::plexus::wrap_stream(
-                                stream,
-                                #content_type,
-                                vec![#namespace.into()]
-                            ))
-                        }
-                    }
                 }
             }
         })
         .collect()
+}
+
+/// Generate param extraction code and return the param names for the call
+fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path) -> (TokenStream, Vec<&'a syn::Ident>) {
+    let param_names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
+
+    let extraction = match m.params.len() {
+        0 => quote! {},
+        1 => {
+            let param = &m.params[0];
+            let param_name = &param.name;
+            let param_str = param_name.to_string();
+            quote! {
+                let #param_name = match &params {
+                    serde_json::Value::Object(map) => {
+                        if let Some(val) = map.get(#param_str) {
+                            serde_json::from_value(val.clone())
+                                .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
+                        } else {
+                            serde_json::from_value(params.clone())
+                                .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
+                        }
+                    }
+                    _ => serde_json::from_value(params.clone())
+                        .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?,
+                };
+            }
+        }
+        _ => {
+            let extractions: Vec<TokenStream> = m
+                .params
+                .iter()
+                .map(|p| {
+                    let name = &p.name;
+                    let name_str = name.to_string();
+                    quote! {
+                        let #name = map.get(#name_str)
+                            .ok_or_else(|| #crate_path::plexus::PlexusError::InvalidParams(
+                                format!("missing field: {}", #name_str)
+                            ))
+                            .and_then(|v| serde_json::from_value(v.clone())
+                                .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string())))?;
+                    }
+                })
+                .collect();
+
+            quote! {
+                let map = params.as_object()
+                    .ok_or_else(|| #crate_path::plexus::PlexusError::InvalidParams(
+                        "expected object".to_string()
+                    ))?;
+                #(#extractions)*
+            }
+        }
+    };
+
+    (extraction, param_names)
 }
 
 fn generate_help_arms(methods: &[MethodInfo]) -> Vec<TokenStream> {

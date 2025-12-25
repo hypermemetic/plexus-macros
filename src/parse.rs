@@ -13,17 +13,25 @@ pub struct HubMethodAttrs {
     pub name: Option<String>,
     /// Parameter descriptions: param_name -> description
     pub param_docs: HashMap<String, String>,
+    /// If true, this method overrides dispatch (returns PlexusStream directly)
+    pub override_call: bool,
 }
 
 impl Parse for HubMethodAttrs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut name = None;
         let mut param_docs = HashMap::new();
+        let mut override_call = false;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
             for meta in metas {
                 match meta {
+                    Meta::Path(path) => {
+                        if path.is_ident("override_call") {
+                            override_call = true;
+                        }
+                    }
                     Meta::NameValue(MetaNameValue { path, value, .. }) => {
                         if path.is_ident("name") {
                             if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
@@ -47,12 +55,11 @@ impl Parse for HubMethodAttrs {
                             }
                         }
                     }
-                    _ => {}
                 }
             }
         }
 
-        Ok(HubMethodAttrs { name, param_docs })
+        Ok(HubMethodAttrs { name, param_docs, override_call })
     }
 }
 
@@ -129,6 +136,8 @@ pub struct MethodInfo {
     pub params: Vec<ParamInfo>,
     pub return_type: Type,
     pub stream_item_type: Option<Type>,
+    /// True if method has #[hub_method(override_call)] - returns PlexusStream directly
+    pub is_override: bool,
 }
 
 impl MethodInfo {
@@ -152,11 +161,14 @@ impl MethodInfo {
         }
         let description = doc_lines.join(" ");
 
-        // Get param docs from hub_method attrs
+        // Get param docs and override_call from hub_method attrs
         let param_docs = hub_method_attrs
             .map(|a| &a.param_docs)
             .cloned()
             .unwrap_or_default();
+        let is_override = hub_method_attrs
+            .map(|a| a.override_call)
+            .unwrap_or(false);
 
         // Extract parameters after &self
         let mut params = Vec::new();
@@ -188,6 +200,21 @@ impl MethodInfo {
 
         let stream_item_type = extract_stream_item_type(&return_type);
 
+        // Check for conflicting return type without override_call
+        let looks_like_passthrough = is_result_plexus_stream(&return_type);
+        if looks_like_passthrough && !is_override {
+            return Err(syn::Error::new_spanned(
+                &method.sig.output,
+                format!(
+                    "Method `{}` returns Result<PlexusStream, _> which conflicts with \
+                    generated wrapping. Add #[hub_macro::hub_method(override_call)] if you \
+                    want to handle dispatch manually, or change return type to \
+                    `impl Stream<Item = T>` for automatic wrapping.",
+                    fn_name
+                ),
+            ));
+        }
+
         Ok(MethodInfo {
             fn_name,
             method_name,
@@ -195,6 +222,7 @@ impl MethodInfo {
             params,
             return_type,
             stream_item_type,
+            is_override,
         })
     }
 }
@@ -220,4 +248,26 @@ fn extract_stream_item_type(ty: &Type) -> Option<Type> {
         }
     }
     None
+}
+
+/// Check if return type looks like Result<PlexusStream, _>
+/// This detects types that should use override_call instead of automatic wrapping
+fn is_result_plexus_stream(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            if segment.ident == "Result" {
+                if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if let Some(GenericArgument::Type(first_type)) = args.args.first() {
+                        // Check if first type arg is PlexusStream
+                        if let Type::Path(inner_path) = first_type {
+                            if let Some(inner_seg) = inner_path.path.segments.last() {
+                                return inner_seg.ident == "PlexusStream";
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
