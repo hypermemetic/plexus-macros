@@ -3,6 +3,8 @@
 use crate::parse::MethodInfo;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &syn::Path) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
@@ -54,6 +56,9 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
     let method_names: Vec<&str> = methods.iter().map(|m| m.method_name.as_str()).collect();
     let method_descriptions: Vec<&str> = methods.iter().map(|m| m.description.as_str()).collect();
 
+    // Compute hashes at compile time for each method
+    let method_hashes: Vec<String> = methods.iter().map(compute_method_hash).collect();
+
     // Generate return type schemas for each method
     let return_schema_entries: Vec<TokenStream> = methods
         .iter()
@@ -93,10 +98,11 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
         }
 
         impl #enum_name {
-            /// Get per-method schema info including params and return types
+            /// Get per-method schema info including params, return types, and content hashes
             pub fn method_schemas() -> Vec<#crate_path::plexus::MethodSchema> {
                 let method_names: &[&str] = &[#(#method_names),*];
                 let descriptions: &[&str] = &[#(#method_descriptions),*];
+                let hashes: &[&str] = &[#(#method_hashes),*];
                 let return_schemas: Vec<Option<schemars::Schema>> = vec![#(#return_schema_entries),*];
 
                 // Get the full enum schema and extract each variant
@@ -113,9 +119,10 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                 method_names
                     .iter()
                     .zip(descriptions.iter())
+                    .zip(hashes.iter())
                     .zip(return_schemas.into_iter())
                     .enumerate()
-                    .map(|(i, ((name, desc), returns))| {
+                    .map(|(i, (((name, desc), hash), returns))| {
                         // Get this variant's schema from oneOf, then extract just the "params" portion
                         // The variant looks like: { properties: { method: {...}, params: {...} }, ... }
                         // We want just the params schema
@@ -127,7 +134,11 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                                 .and_then(|p| serde_json::from_value::<schemars::Schema>(p).ok())
                         });
 
-                        let mut schema = #crate_path::plexus::MethodSchema::new(name.to_string(), desc.to_string());
+                        let mut schema = #crate_path::plexus::MethodSchema::new(
+                            name.to_string(),
+                            desc.to_string(),
+                            hash.to_string(),
+                        );
                         if let Some(p) = params {
                             schema = schema.with_params(p);
                         }
@@ -152,4 +163,43 @@ fn to_pascal_case(s: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Compute a hash for a method definition
+///
+/// The hash is computed from:
+/// - Method name
+/// - Parameter names and types (stringified)
+/// - Description
+///
+/// This provides cache invalidation at the method level -
+/// if any aspect of the method signature changes, the hash changes.
+fn compute_method_hash(method: &MethodInfo) -> String {
+    let mut hasher = DefaultHasher::new();
+
+    // Hash method name
+    method.method_name.hash(&mut hasher);
+
+    // Hash description
+    method.description.hash(&mut hasher);
+
+    // Hash each parameter (name + type as string)
+    for param in &method.params {
+        param.name.to_string().hash(&mut hasher);
+        // Convert type to string for hashing
+        let ty = &param.ty;
+        let ty_str = quote!(#ty).to_string();
+        ty_str.hash(&mut hasher);
+        if let Some(desc) = &param.description {
+            desc.hash(&mut hasher);
+        }
+    }
+
+    // Hash return type if present
+    if let Some(item_ty) = &method.stream_item_type {
+        let ty_str = quote!(#item_ty).to_string();
+        ty_str.hash(&mut hasher);
+    }
+
+    format!("{:016x}", hasher.finish())
 }
