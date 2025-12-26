@@ -12,6 +12,7 @@ pub fn generate(
     methods: &[MethodInfo],
     crate_path: &syn::Path,
     resolve_handle: bool,
+    hub: bool,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
@@ -35,6 +36,30 @@ pub fn generate(
         }
     } else {
         quote! {}
+    };
+
+    // Generate plugin_schema body - hub vs leaf
+    let plugin_schema_body = if hub {
+        // Hub: calls self.plugin_children() to get child schemas
+        quote! {
+            #crate_path::plexus::PluginSchema::hub(
+                #namespace,
+                #version,
+                #description,
+                #enum_name::method_schemas(),
+                self.plugin_children(),
+            )
+        }
+    } else {
+        // Leaf: no children
+        quote! {
+            #crate_path::plexus::PluginSchema::leaf(
+                #namespace,
+                #version,
+                #description,
+                #enum_name::method_schemas(),
+            )
+        }
     };
 
     quote! {
@@ -91,13 +116,8 @@ pub fn generate(
                 self.into_rpc().into()
             }
 
-            fn full_schema(&self) -> #crate_path::plexus::ActivationFullSchema {
-                #crate_path::plexus::ActivationFullSchema {
-                    namespace: #namespace.to_string(),
-                    version: #version.to_string(),
-                    description: #description.to_string(),
-                    methods: #enum_name::method_schemas(),
-                }
+            fn plugin_schema(&self) -> #crate_path::plexus::PluginSchema {
+                #plugin_schema_body
             }
 
             #resolve_handle_impl

@@ -94,7 +94,7 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
 
         impl #enum_name {
             /// Get per-method schema info including params and return types
-            pub fn method_schemas() -> Vec<#crate_path::plexus::MethodSchemaInfo> {
+            pub fn method_schemas() -> Vec<#crate_path::plexus::MethodSchema> {
                 let method_names: &[&str] = &[#(#method_names),*];
                 let descriptions: &[&str] = &[#(#method_descriptions),*];
                 let return_schemas: Vec<Option<schemars::Schema>> = vec![#(#return_schema_entries),*];
@@ -127,12 +127,14 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                                 .and_then(|p| serde_json::from_value::<schemars::Schema>(p).ok())
                         });
 
-                        #crate_path::plexus::MethodSchemaInfo {
-                            name: name.to_string(),
-                            description: desc.to_string(),
-                            params,
-                            returns,
+                        let mut schema = #crate_path::plexus::MethodSchema::new(name.to_string(), desc.to_string());
+                        if let Some(p) = params {
+                            schema = schema.with_params(p);
                         }
+                        if let Some(r) = returns {
+                            schema = schema.with_returns(r);
+                        }
+                        schema
                     })
                     .collect()
             }

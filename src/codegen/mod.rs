@@ -67,6 +67,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         &methods,
         &crate_path,
         args.resolve_handle,
+        args.hub,
     );
 
     Ok(quote! {

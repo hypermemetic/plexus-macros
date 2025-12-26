@@ -71,6 +71,8 @@ pub struct HubMethodsAttrs {
     pub crate_path: String,
     /// If true, generate resolve_handle that delegates to self.resolve_handle_impl()
     pub resolve_handle: bool,
+    /// If true, this activation is a hub with children (calls self.plugin_children())
+    pub hub: bool,
 }
 
 impl Parse for HubMethodsAttrs {
@@ -80,6 +82,7 @@ impl Parse for HubMethodsAttrs {
         let mut description = None;
         let mut crate_path = "crate".to_string();
         let mut resolve_handle = false;
+        let mut hub = false;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -100,9 +103,11 @@ impl Parse for HubMethodsAttrs {
                         }
                     }
                     Meta::Path(path) => {
-                        // Handle bare flags like `resolve_handle`
+                        // Handle bare flags like `resolve_handle`, `hub`
                         if path.is_ident("resolve_handle") {
                             resolve_handle = true;
+                        } else if path.is_ident("hub") {
+                            hub = true;
                         }
                     }
                     _ => {}
@@ -117,7 +122,7 @@ impl Parse for HubMethodsAttrs {
             ));
         }
 
-        Ok(HubMethodsAttrs { namespace, version, description, crate_path, resolve_handle })
+        Ok(HubMethodsAttrs { namespace, version, description, crate_path, resolve_handle, hub })
     }
 }
 
