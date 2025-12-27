@@ -29,6 +29,7 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                     // Use struct variant for all cases (including single param)
                     // This produces proper object schema with field names
                     // Add description for each field from param_docs or fallback to name
+                    // Add #[serde(default)] for Option<T> fields to make them truly optional
                     let fields: Vec<TokenStream> = m
                         .params
                         .iter()
@@ -37,9 +38,20 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                             let ty = &p.ty;
                             let desc = p.description.clone()
                                 .unwrap_or_else(|| format!("The {} parameter", name));
-                            quote! {
-                                #[schemars(description = #desc)]
-                                #name: #ty
+
+                            // Check if type is Option<T> - if so, add #[serde(default)]
+                            let is_option = is_option_type(ty);
+                            if is_option {
+                                quote! {
+                                    #[schemars(description = #desc)]
+                                    #[serde(default)]
+                                    #name: #ty
+                                }
+                            } else {
+                                quote! {
+                                    #[schemars(description = #desc)]
+                                    #name: #ty
+                                }
                             }
                         })
                         .collect();
@@ -202,4 +214,17 @@ fn compute_method_hash(method: &MethodInfo) -> String {
     }
 
     format!("{:016x}", hasher.finish())
+}
+
+/// Check if a type is Option<T>
+///
+/// This is used to determine if a field should have #[serde(default)]
+/// so that it can be omitted from the JSON input.
+pub fn is_option_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            return segment.ident == "Option";
+        }
+    }
+    false
 }

@@ -38,6 +38,20 @@ pub fn generate(
         quote! {}
     };
 
+    // Generate call() fallback - hub routes to children, leaf returns error
+    let call_fallback = if hub {
+        quote! {
+            #crate_path::plexus::route_to_child(self, method, params).await
+        }
+    } else {
+        quote! {
+            Err(#crate_path::plexus::PlexusError::MethodNotFound {
+                activation: #namespace.to_string(),
+                method: method.to_string(),
+            })
+        }
+    };
+
     // Generate plugin_schema body - hub vs leaf
     let plugin_schema_body = if hub {
         // Hub: calls self.plugin_children() to get child schemas
@@ -103,12 +117,14 @@ pub fn generate(
                 method: &str,
                 params: serde_json::Value,
             ) -> Result<#crate_path::plexus::PlexusStream, #crate_path::plexus::PlexusError> {
+                // Try local methods first
                 match method {
                     #(#dispatch_arms)*
-                    _ => Err(#crate_path::plexus::PlexusError::MethodNotFound {
-                        activation: #namespace.to_string(),
-                        method: method.to_string(),
-                    }),
+                    _ => {
+                        // For hubs: try routing to child plugin via ChildRouter trait
+                        // For leaves: return MethodNotFound
+                        #call_fallback
+                    }
                 }
             }
 
@@ -354,13 +370,26 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path) -> (
                 .map(|p| {
                     let name = &p.name;
                     let name_str = name.to_string();
-                    quote! {
-                        let #name = map.get(#name_str)
-                            .ok_or_else(|| #crate_path::plexus::PlexusError::InvalidParams(
-                                format!("missing field: {}", #name_str)
-                            ))
-                            .and_then(|v| serde_json::from_value(v.clone())
-                                .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string())))?;
+                    let is_option = crate::codegen::method_enum::is_option_type(&p.ty);
+
+                    if is_option {
+                        // For Option<T>, missing field = None (not an error)
+                        quote! {
+                            let #name = map.get(#name_str)
+                                .map(|v| serde_json::from_value(v.clone()))
+                                .transpose()
+                                .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?;
+                        }
+                    } else {
+                        // For required fields, error on missing
+                        quote! {
+                            let #name = map.get(#name_str)
+                                .ok_or_else(|| #crate_path::plexus::PlexusError::InvalidParams(
+                                    format!("missing field: {}", #name_str)
+                                ))
+                                .and_then(|v| serde_json::from_value(v.clone())
+                                    .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string())))?;
+                        }
                     }
                 })
                 .collect();
