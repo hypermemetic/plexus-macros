@@ -14,7 +14,7 @@ quote = "1.0"
 syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
 
 [dev-dependencies]
-substrate = { path = "../substrate" }
+substrate = { path = "../substrate", package = "substrate-hub" }
 dialectic = { version = "0.4.1", features = ["tokio"] }
 schemars = { version = "1.0.4", features = ["derive", "uuid1"] }
 serde = { version = "1.0", features = ["derive"] }
