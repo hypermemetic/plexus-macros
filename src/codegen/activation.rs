@@ -102,12 +102,13 @@ pub fn generate(
             fn description(&self) -> &str { #description }
 
             fn methods(&self) -> Vec<&str> {
-                vec![#(#method_names),*]
+                vec![#(#method_names,)* "schema"]
             }
 
             fn method_help(&self, method: &str) -> Option<String> {
                 match method {
                     #(#help_arms)*
+                    "schema" => Some("Get this plugin's schema (shallow - children as summaries only)".to_string()),
                     _ => None,
                 }
             }
@@ -120,6 +121,14 @@ pub fn generate(
                 // Try local methods first
                 match method {
                     #(#dispatch_arms)*
+                    "schema" => {
+                        let schema = self.plugin_schema().shallow();
+                        Ok(#crate_path::plexus::wrap_stream(
+                            futures::stream::once(async move { schema }),
+                            concat!(#namespace, ".schema"),
+                            vec![#namespace.into()]
+                        ))
+                    }
                     _ => {
                         // For hubs: try routing to child plugin via ChildRouter trait
                         // For leaves: return MethodNotFound
