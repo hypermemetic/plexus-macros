@@ -9,6 +9,7 @@ pub fn generate(
     namespace: &str,
     version: &str,
     description: &str,
+    long_description: Option<&str>,
     methods: &[MethodInfo],
     crate_path: &syn::Path,
     resolve_handle: bool,
@@ -29,7 +30,7 @@ pub fn generate(
         quote! {
             async fn resolve_handle(
                 &self,
-                handle: &#crate_path::activations::arbor::Handle,
+                handle: &#crate_path::types::Handle,
             ) -> Result<#crate_path::plexus::PlexusStream, #crate_path::plexus::PlexusError> {
                 self.resolve_handle_impl(handle).await
             }
@@ -52,27 +53,66 @@ pub fn generate(
         }
     };
 
-    // Generate plugin_schema body - hub vs leaf
-    let plugin_schema_body = if hub {
-        // Hub: calls self.plugin_children() to get child schemas
+    // Generate long_description() method
+    let long_description_impl = if let Some(long_desc) = long_description {
         quote! {
-            #crate_path::plexus::PluginSchema::hub(
-                #namespace,
-                #version,
-                #description,
-                #enum_name::method_schemas(),
-                self.plugin_children(),
-            )
+            fn long_description(&self) -> Option<&str> { Some(#long_desc) }
         }
     } else {
-        // Leaf: no children
         quote! {
-            #crate_path::plexus::PluginSchema::leaf(
-                #namespace,
-                #version,
-                #description,
-                #enum_name::method_schemas(),
-            )
+            fn long_description(&self) -> Option<&str> { None }
+        }
+    };
+
+    // Generate plugin_schema body - hub vs leaf, with or without long_description
+    let plugin_schema_body = match (hub, long_description) {
+        (true, Some(long_desc)) => {
+            // Hub with long description
+            quote! {
+                #crate_path::plexus::PluginSchema::hub_with_long_description(
+                    #namespace,
+                    #version,
+                    #description,
+                    #long_desc,
+                    #enum_name::method_schemas(),
+                    self.plugin_children(),
+                )
+            }
+        }
+        (true, None) => {
+            // Hub without long description
+            quote! {
+                #crate_path::plexus::PluginSchema::hub(
+                    #namespace,
+                    #version,
+                    #description,
+                    #enum_name::method_schemas(),
+                    self.plugin_children(),
+                )
+            }
+        }
+        (false, Some(long_desc)) => {
+            // Leaf with long description
+            quote! {
+                #crate_path::plexus::PluginSchema::leaf_with_long_description(
+                    #namespace,
+                    #version,
+                    #description,
+                    #long_desc,
+                    #enum_name::method_schemas(),
+                )
+            }
+        }
+        (false, None) => {
+            // Leaf without long description
+            quote! {
+                #crate_path::plexus::PluginSchema::leaf(
+                    #namespace,
+                    #version,
+                    #description,
+                    #enum_name::method_schemas(),
+                )
+            }
         }
     };
 
@@ -100,6 +140,7 @@ pub fn generate(
             fn namespace(&self) -> &str { #namespace }
             fn version(&self) -> &str { #version }
             fn description(&self) -> &str { #description }
+            #long_description_impl
 
             fn methods(&self) -> Vec<&str> {
                 vec![#(#method_names,)* "schema"]
@@ -108,7 +149,7 @@ pub fn generate(
             fn method_help(&self, method: &str) -> Option<String> {
                 match method {
                     #(#help_arms)*
-                    "schema" => Some("Get this plugin's schema".to_string()),
+                    "schema" => Some("Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.".to_string()),
                     _ => None,
                 }
             }
@@ -122,14 +163,49 @@ pub fn generate(
                 match method {
                     #(#dispatch_arms)*
                     "schema" => {
-                        let schema = self.plugin_schema();
+                        // Check if a specific method was requested
+                        let method_name: Option<String> = params.get("method")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        let plugin_schema = self.plugin_schema();
+
+                        let result = if let Some(ref name) = method_name {
+                            // Find the specific method
+                            plugin_schema.methods.iter()
+                                .find(|m| m.name == *name)
+                                .map(|m| #crate_path::plexus::SchemaResult::Method(m.clone()))
+                                .ok_or_else(|| #crate_path::plexus::PlexusError::MethodNotFound {
+                                    activation: #namespace.to_string(),
+                                    method: name.clone(),
+                                })?
+                        } else {
+                            // Return full plugin schema
+                            #crate_path::plexus::SchemaResult::Plugin(plugin_schema)
+                        };
+
                         Ok(#crate_path::plexus::wrap_stream(
-                            futures::stream::once(async move { schema }),
+                            futures::stream::once(async move { result }),
                             concat!(#namespace, ".schema"),
                             vec![#namespace.into()]
                         ))
                     }
                     _ => {
+                        // Check for {method}.schema pattern (e.g., "echo.schema")
+                        // Only if the prefix is an actual local method (not a child)
+                        if let Some(method_name) = method.strip_suffix(".schema") {
+                            let plugin_schema = self.plugin_schema();
+                            if let Some(m) = plugin_schema.methods.iter().find(|m| m.name == method_name) {
+                                let result = #crate_path::plexus::SchemaResult::Method(m.clone());
+                                return Ok(#crate_path::plexus::wrap_stream(
+                                    futures::stream::once(async move { result }),
+                                    concat!(#namespace, ".method_schema"),
+                                    vec![#namespace.into()]
+                                ));
+                            }
+                            // Not a local method - fall through to child routing
+                        }
+
                         // For hubs: try routing to child plugin via ChildRouter trait
                         // For leaves: return MethodNotFound
                         #call_fallback

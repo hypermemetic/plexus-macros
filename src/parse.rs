@@ -63,11 +63,17 @@ impl Parse for HubMethodAttrs {
     }
 }
 
+/// Maximum word count for description
+const MAX_DESCRIPTION_WORDS: usize = 15;
+
 /// Parsed attributes for #[hub_methods]
 pub struct HubMethodsAttrs {
     pub namespace: String,
     pub version: String,
+    /// Short description (max 15 words)
     pub description: Option<String>,
+    /// Long description (optional, for detailed documentation)
+    pub long_description: Option<String>,
     pub crate_path: String,
     /// If true, generate resolve_handle that delegates to self.resolve_handle_impl()
     pub resolve_handle: bool,
@@ -80,6 +86,7 @@ impl Parse for HubMethodsAttrs {
         let mut namespace = String::new();
         let mut version = "1.0.0".to_string();
         let mut description = None;
+        let mut long_description = None;
         let mut crate_path = "crate".to_string();
         let mut resolve_handle = false;
         let mut hub = false;
@@ -96,7 +103,22 @@ impl Parse for HubMethodsAttrs {
                             } else if path.is_ident("version") {
                                 version = s.value();
                             } else if path.is_ident("description") {
-                                description = Some(s.value());
+                                let desc = s.value();
+                                // Validate word count
+                                let word_count = desc.split_whitespace().count();
+                                if word_count > MAX_DESCRIPTION_WORDS {
+                                    return Err(syn::Error::new(
+                                        s.span(),
+                                        format!(
+                                            "description must be {} words or fewer (found {} words). \
+                                            Use long_description for detailed text.",
+                                            MAX_DESCRIPTION_WORDS, word_count
+                                        ),
+                                    ));
+                                }
+                                description = Some(desc);
+                            } else if path.is_ident("long_description") {
+                                long_description = Some(s.value());
                             } else if path.is_ident("crate_path") {
                                 crate_path = s.value();
                             }
@@ -122,7 +144,7 @@ impl Parse for HubMethodsAttrs {
             ));
         }
 
-        Ok(HubMethodsAttrs { namespace, version, description, crate_path, resolve_handle, hub })
+        Ok(HubMethodsAttrs { namespace, version, description, long_description, crate_path, resolve_handle, hub })
     }
 }
 

@@ -64,6 +64,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         &args.namespace,
         &args.version,
         args.description.as_deref().unwrap_or(&format!("{} activation", args.namespace)),
+        args.long_description.as_deref(),
         &methods,
         &crate_path,
         args.resolve_handle,
