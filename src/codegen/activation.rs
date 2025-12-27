@@ -108,7 +108,7 @@ pub fn generate(
             fn method_help(&self, method: &str) -> Option<String> {
                 match method {
                     #(#help_arms)*
-                    "schema" => Some("Get this plugin's schema (shallow - children as summaries only)".to_string()),
+                    "schema" => Some("Get this plugin's schema".to_string()),
                     _ => None,
                 }
             }
@@ -122,7 +122,7 @@ pub fn generate(
                 match method {
                     #(#dispatch_arms)*
                     "schema" => {
-                        let schema = self.plugin_schema().shallow();
+                        let schema = self.plugin_schema();
                         Ok(#crate_path::plexus::wrap_stream(
                             futures::stream::once(async move { schema }),
                             concat!(#namespace, ".schema"),
