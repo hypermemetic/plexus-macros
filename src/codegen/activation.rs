@@ -3,6 +3,7 @@
 use crate::parse::MethodInfo;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+use uuid::Uuid;
 
 pub fn generate(
     struct_name: &syn::Ident,
@@ -14,6 +15,7 @@ pub fn generate(
     crate_path: &syn::Path,
     resolve_handle: bool,
     hub: bool,
+    plugin_id: Option<&str>,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
@@ -116,9 +118,25 @@ pub fn generate(
         }
     };
 
+    // Generate plugin_id - either from explicit value or deterministically from namespace+version
+    let plugin_id_str = plugin_id
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            // Generate deterministic UUID v5 from namespace+version
+            let name = format!("{}@{}", namespace, version);
+            Uuid::new_v5(&Uuid::NAMESPACE_OID, name.as_bytes()).to_string()
+        });
+
     quote! {
         impl #struct_name {
             pub const NAMESPACE: &'static str = #namespace;
+            /// Stable plugin instance ID for handle routing
+            pub const PLUGIN_ID: uuid::Uuid = uuid::uuid!(#plugin_id_str);
+
+            /// Get the plugin's stable instance ID
+            pub fn plugin_id(&self) -> uuid::Uuid {
+                Self::PLUGIN_ID
+            }
         }
 
         // Generate the RPC trait for jsonrpsee
