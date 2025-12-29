@@ -79,6 +79,9 @@ pub struct HubMethodsAttrs {
     pub resolve_handle: bool,
     /// If true, this activation is a hub with children (calls self.plugin_children())
     pub hub: bool,
+    /// Stable UUID for this plugin instance (for handle routing)
+    /// If not provided, a deterministic UUID is generated from namespace
+    pub plugin_id: Option<String>,
 }
 
 impl Parse for HubMethodsAttrs {
@@ -90,6 +93,7 @@ impl Parse for HubMethodsAttrs {
         let mut crate_path = "crate".to_string();
         let mut resolve_handle = false;
         let mut hub = false;
+        let mut plugin_id = None;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -121,6 +125,16 @@ impl Parse for HubMethodsAttrs {
                                 long_description = Some(s.value());
                             } else if path.is_ident("crate_path") {
                                 crate_path = s.value();
+                            } else if path.is_ident("plugin_id") {
+                                // Validate UUID format
+                                let id_str = s.value();
+                                if uuid::Uuid::parse_str(&id_str).is_err() {
+                                    return Err(syn::Error::new(
+                                        s.span(),
+                                        format!("plugin_id must be a valid UUID, got: {}", id_str),
+                                    ));
+                                }
+                                plugin_id = Some(id_str);
                             }
                         }
                     }
@@ -144,7 +158,7 @@ impl Parse for HubMethodsAttrs {
             ));
         }
 
-        Ok(HubMethodsAttrs { namespace, version, description, long_description, crate_path, resolve_handle, hub })
+        Ok(HubMethodsAttrs { namespace, version, description, long_description, crate_path, resolve_handle, hub, plugin_id })
     }
 }
 
