@@ -94,6 +94,9 @@ pub struct HubMethodsAttrs {
     /// Stable UUID for this plugin instance (for handle routing)
     /// If not provided, a deterministic UUID is generated from namespace
     pub plugin_id: Option<String>,
+    /// If set, namespace() will call this method instead of returning the constant
+    /// e.g., namespace_fn = "runtime_namespace" generates: fn namespace(&self) -> &str { self.runtime_namespace() }
+    pub namespace_fn: Option<String>,
 }
 
 impl Parse for HubMethodsAttrs {
@@ -106,6 +109,7 @@ impl Parse for HubMethodsAttrs {
         let mut resolve_handle = false;
         let mut hub = false;
         let mut plugin_id = None;
+        let mut namespace_fn = None;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -147,6 +151,8 @@ impl Parse for HubMethodsAttrs {
                                     ));
                                 }
                                 plugin_id = Some(id_str);
+                            } else if path.is_ident("namespace_fn") {
+                                namespace_fn = Some(s.value());
                             }
                         }
                     }
@@ -170,7 +176,7 @@ impl Parse for HubMethodsAttrs {
             ));
         }
 
-        Ok(HubMethodsAttrs { namespace, version, description, long_description, crate_path, resolve_handle, hub, plugin_id })
+        Ok(HubMethodsAttrs { namespace, version, description, long_description, crate_path, resolve_handle, hub, plugin_id, namespace_fn })
     }
 }
 

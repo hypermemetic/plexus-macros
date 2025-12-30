@@ -70,6 +70,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         args.resolve_handle,
         args.hub,
         args.plugin_id.as_deref(),
+        args.namespace_fn.as_deref(),
     );
 
     Ok(quote! {
