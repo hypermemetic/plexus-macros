@@ -118,12 +118,15 @@ pub fn generate(
         }
     };
 
-    // Generate plugin_id - either from explicit value or deterministically from namespace+version
+    // Generate plugin_id - either from explicit value or deterministically from namespace+major_version
+    // Using only major version ensures handles survive minor/patch upgrades (semver compatibility)
     let plugin_id_str = plugin_id
         .map(|s| s.to_string())
         .unwrap_or_else(|| {
-            // Generate deterministic UUID v5 from namespace+version
-            let name = format!("{}@{}", namespace, version);
+            // Extract major version (first component before '.')
+            let major_version = version.split('.').next().unwrap_or("0");
+            // Generate deterministic UUID v5 from namespace@major_version
+            let name = format!("{}@{}", namespace, major_version);
             Uuid::new_v5(&Uuid::NAMESPACE_OID, name.as_bytes()).to_string()
         });
 
@@ -450,20 +453,41 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path) -> (
             let param = &m.params[0];
             let param_name = &param.name;
             let param_str = param_name.to_string();
-            quote! {
-                let #param_name = match &params {
-                    serde_json::Value::Object(map) => {
-                        if let Some(val) = map.get(#param_str) {
-                            serde_json::from_value(val.clone())
-                                .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
-                        } else {
-                            serde_json::from_value(params.clone())
+            let is_option = crate::codegen::method_enum::is_option_type(&param.ty);
+
+            if is_option {
+                // For Option<T>, missing field = None (not an error)
+                quote! {
+                    let #param_name = match &params {
+                        serde_json::Value::Object(map) => {
+                            map.get(#param_str)
+                                .map(|v| serde_json::from_value(v.clone()))
+                                .transpose()
                                 .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
                         }
-                    }
-                    _ => serde_json::from_value(params.clone())
-                        .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?,
-                };
+                        serde_json::Value::Null => None,
+                        _ => serde_json::from_value(params.clone())
+                            .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?,
+                    };
+                }
+            } else {
+                // For required param, try to extract from object or deserialize directly
+                quote! {
+                    let #param_name = match &params {
+                        serde_json::Value::Object(map) => {
+                            if let Some(val) = map.get(#param_str) {
+                                serde_json::from_value(val.clone())
+                                    .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
+                            } else {
+                                return Err(#crate_path::plexus::PlexusError::InvalidParams(
+                                    format!("missing field: {}", #param_str)
+                                ));
+                            }
+                        }
+                        _ => serde_json::from_value(params.clone())
+                            .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?,
+                    };
+                }
             }
         }
         _ => {

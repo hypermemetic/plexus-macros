@@ -72,13 +72,22 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
     let method_hashes: Vec<String> = methods.iter().map(compute_method_hash).collect();
 
     // Generate return type schemas for each method
+    // Each entry is a tuple of (full_schema, variant_filter)
+    // If variant_filter is non-empty, we filter the oneOf to only those variants
     let return_schema_entries: Vec<TokenStream> = methods
         .iter()
         .map(|m| {
             if let Some(item_ty) = &m.stream_item_type {
-                quote! { Some(schemars::schema_for!(#item_ty)) }
+                if m.returns_variants.is_empty() {
+                    // No filtering - return full schema
+                    quote! { (Some(schemars::schema_for!(#item_ty)), Vec::<&str>::new()) }
+                } else {
+                    // Return schema with filter list
+                    let variants = &m.returns_variants;
+                    quote! { (Some(schemars::schema_for!(#item_ty)), vec![#(#variants),*]) }
+                }
             } else {
-                quote! { None }
+                quote! { (None, Vec::<&str>::new()) }
             }
         })
         .collect();
@@ -115,7 +124,7 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                 let method_names: &[&str] = &[#(#method_names),*];
                 let descriptions: &[&str] = &[#(#method_descriptions),*];
                 let hashes: &[&str] = &[#(#method_hashes),*];
-                let return_schemas: Vec<Option<schemars::Schema>> = vec![#(#return_schema_entries),*];
+                let return_schemas: Vec<(Option<schemars::Schema>, Vec<&str>)> = vec![#(#return_schema_entries),*];
 
                 // Get the full enum schema and extract each variant
                 let full_schema = schemars::schema_for!(#enum_name);
@@ -134,7 +143,7 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                     .zip(hashes.iter())
                     .zip(return_schemas.into_iter())
                     .enumerate()
-                    .map(|(i, (((name, desc), hash), returns))| {
+                    .map(|(i, (((name, desc), hash), (returns_opt, variant_filter)))| {
                         // Get this variant's schema from oneOf, then extract just the "params" portion
                         // The variant looks like: { properties: { method: {...}, params: {...} }, ... }
                         // We want just the params schema
@@ -146,6 +155,15 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                                 .and_then(|p| serde_json::from_value::<schemars::Schema>(p).ok())
                         });
 
+                        // Filter return schema if variant_filter is specified
+                        let filtered_returns = returns_opt.map(|schema| {
+                            if variant_filter.is_empty() {
+                                schema
+                            } else {
+                                Self::filter_return_schema(schema, &variant_filter)
+                            }
+                        });
+
                         let mut schema = #crate_path::plexus::MethodSchema::new(
                             name.to_string(),
                             desc.to_string(),
@@ -154,12 +172,69 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                         if let Some(p) = params {
                             schema = schema.with_params(p);
                         }
-                        if let Some(r) = returns {
+                        if let Some(r) = filtered_returns {
                             schema = schema.with_returns(r);
                         }
                         schema
                     })
                     .collect()
+            }
+
+            /// Filter a return schema to only include specified variants
+            ///
+            /// This handles the case where a method returns an enum but only uses
+            /// specific variants. The schema is filtered at runtime to only include
+            /// those variants in the oneOf array.
+            fn filter_return_schema(schema: schemars::Schema, allowed_variants: &[&str]) -> schemars::Schema {
+                // Convert to JSON for manipulation
+                let mut schema_value = serde_json::to_value(&schema).expect("Schema should serialize");
+
+                // Check if this is a oneOf enum schema
+                if let Some(one_of) = schema_value.get_mut("oneOf").and_then(|v| v.as_array_mut()) {
+                    // Filter to only variants whose "type" field (the discriminant) matches allowed_variants
+                    // serde's internally tagged enums produce: { "type": "variant_name", ...fields }
+                    // We need to check the "const" value in the "type" property
+                    one_of.retain(|variant| {
+                        // Try to find the variant's tag name
+                        let variant_name = variant
+                            .get("properties")
+                            .and_then(|props| props.get("type"))
+                            .and_then(|type_prop| type_prop.get("const"))
+                            .and_then(|c| c.as_str())
+                            .or_else(|| {
+                                // Some schemas use "enum" instead of "const"
+                                variant
+                                    .get("properties")
+                                    .and_then(|props| props.get("type"))
+                                    .and_then(|type_prop| type_prop.get("enum"))
+                                    .and_then(|e| e.as_array())
+                                    .and_then(|arr| arr.first())
+                                    .and_then(|v| v.as_str())
+                            });
+
+                        if let Some(name) = variant_name {
+                            // Convert snake_case variant name to PascalCase for comparison
+                            let pascal_name = name.split('_')
+                                .map(|word| {
+                                    let mut chars = word.chars();
+                                    match chars.next() {
+                                        None => String::new(),
+                                        Some(first) => first.to_uppercase().chain(chars).collect(),
+                                    }
+                                })
+                                .collect::<String>();
+
+                            allowed_variants.contains(&pascal_name.as_str()) ||
+                            allowed_variants.contains(&name)
+                        } else {
+                            // Can't determine variant name, keep it
+                            true
+                        }
+                    });
+                }
+
+                // Convert back to Schema
+                serde_json::from_value(schema_value).expect("Filtered schema should deserialize")
             }
         }
     }
