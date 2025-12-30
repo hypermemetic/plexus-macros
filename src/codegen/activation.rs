@@ -16,6 +16,7 @@ pub fn generate(
     resolve_handle: bool,
     hub: bool,
     plugin_id: Option<&str>,
+    namespace_fn: Option<&str>,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
@@ -130,6 +131,14 @@ pub fn generate(
             Uuid::new_v5(&Uuid::NAMESPACE_OID, name.as_bytes()).to_string()
         });
 
+    // Generate namespace() implementation - either constant or dynamic via method call
+    let namespace_impl = if let Some(fn_name) = namespace_fn {
+        let fn_ident = format_ident!("{}", fn_name);
+        quote! { fn namespace(&self) -> &str { self.#fn_ident() } }
+    } else {
+        quote! { fn namespace(&self) -> &str { #namespace } }
+    };
+
     quote! {
         impl #struct_name {
             pub const NAMESPACE: &'static str = #namespace;
@@ -158,7 +167,7 @@ pub fn generate(
         impl #crate_path::plexus::Activation for #struct_name {
             type Methods = #enum_name;
 
-            fn namespace(&self) -> &str { #namespace }
+            #namespace_impl
             fn version(&self) -> &str { #version }
             fn description(&self) -> &str { #description }
             #long_description_impl
