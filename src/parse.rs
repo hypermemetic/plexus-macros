@@ -15,6 +15,10 @@ pub struct HubMethodAttrs {
     pub param_docs: HashMap<String, String>,
     /// If true, this method overrides dispatch (returns PlexusStream directly)
     pub override_call: bool,
+    /// Specific enum variants this method can return (for filtered schema generation)
+    /// When specified, the return schema will only include these variants from the event enum.
+    /// Format: returns(Variant1, Variant2, Error)
+    pub returns_variants: Vec<String>,
 }
 
 impl Parse for HubMethodAttrs {
@@ -22,6 +26,7 @@ impl Parse for HubMethodAttrs {
         let mut name = None;
         let mut param_docs = HashMap::new();
         let mut override_call = false;
+        let mut returns_variants = Vec::new();
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -53,13 +58,20 @@ impl Parse for HubMethodAttrs {
                                     }
                                 }
                             }
+                        } else if path.is_ident("returns") {
+                            // Parse returns(Variant1, Variant2, Error)
+                            let parser = Punctuated::<syn::Ident, Token![,]>::parse_terminated;
+                            let nested = syn::parse::Parser::parse2(parser, tokens.clone())?;
+                            for ident in nested {
+                                returns_variants.push(ident.to_string());
+                            }
                         }
                     }
                 }
             }
         }
 
-        Ok(HubMethodAttrs { name, param_docs, override_call })
+        Ok(HubMethodAttrs { name, param_docs, override_call, returns_variants })
     }
 }
 
@@ -179,6 +191,8 @@ pub struct MethodInfo {
     pub stream_item_type: Option<Type>,
     /// True if method has #[hub_method(override_call)] - returns PlexusStream directly
     pub is_override: bool,
+    /// Specific enum variants this method can return (empty = all variants)
+    pub returns_variants: Vec<String>,
 }
 
 impl MethodInfo {
@@ -202,7 +216,7 @@ impl MethodInfo {
         }
         let description = doc_lines.join(" ");
 
-        // Get param docs and override_call from hub_method attrs
+        // Get param docs, override_call, and returns_variants from hub_method attrs
         let param_docs = hub_method_attrs
             .map(|a| &a.param_docs)
             .cloned()
@@ -210,6 +224,9 @@ impl MethodInfo {
         let is_override = hub_method_attrs
             .map(|a| a.override_call)
             .unwrap_or(false);
+        let returns_variants = hub_method_attrs
+            .map(|a| a.returns_variants.clone())
+            .unwrap_or_default();
 
         // Extract parameters after &self
         let mut params = Vec::new();
@@ -264,6 +281,7 @@ impl MethodInfo {
             return_type,
             stream_item_type,
             is_override,
+            returns_variants,
         })
     }
 }
