@@ -93,10 +93,10 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
         .collect();
 
     // Generate streaming flags for each method
-    // A method is streaming if it has a stream_item_type (returns impl Stream<Item = T>)
+    // Streaming is explicitly declared via #[hub_method(streaming)] attribute
     let streaming_flags: Vec<bool> = methods
         .iter()
-        .map(|m| m.stream_item_type.is_some())
+        .map(|m| m.streaming)
         .collect();
 
     quote! {

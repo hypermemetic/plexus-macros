@@ -19,6 +19,10 @@ pub struct HubMethodAttrs {
     /// When specified, the return schema will only include these variants from the event enum.
     /// Format: returns(Variant1, Variant2, Error)
     pub returns_variants: Vec<String>,
+    /// If true, this method streams multiple events over time.
+    /// If false (default), it yields a single result.
+    /// Used to determine client API: streaming -> AsyncGenerator, non-streaming -> Promise
+    pub streaming: bool,
 }
 
 impl Parse for HubMethodAttrs {
@@ -27,6 +31,7 @@ impl Parse for HubMethodAttrs {
         let mut param_docs = HashMap::new();
         let mut override_call = false;
         let mut returns_variants = Vec::new();
+        let mut streaming = false;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -35,6 +40,8 @@ impl Parse for HubMethodAttrs {
                     Meta::Path(path) => {
                         if path.is_ident("override_call") {
                             override_call = true;
+                        } else if path.is_ident("streaming") {
+                            streaming = true;
                         }
                     }
                     Meta::NameValue(MetaNameValue { path, value, .. }) => {
@@ -71,7 +78,7 @@ impl Parse for HubMethodAttrs {
             }
         }
 
-        Ok(HubMethodAttrs { name, param_docs, override_call, returns_variants })
+        Ok(HubMethodAttrs { name, param_docs, override_call, returns_variants, streaming })
     }
 }
 
@@ -199,6 +206,9 @@ pub struct MethodInfo {
     pub is_override: bool,
     /// Specific enum variants this method can return (empty = all variants)
     pub returns_variants: Vec<String>,
+    /// True if method streams multiple events (from #[hub_method(streaming)])
+    /// False (default) means method yields a single result
+    pub streaming: bool,
 }
 
 impl MethodInfo {
@@ -233,6 +243,9 @@ impl MethodInfo {
         let returns_variants = hub_method_attrs
             .map(|a| a.returns_variants.clone())
             .unwrap_or_default();
+        let streaming = hub_method_attrs
+            .map(|a| a.streaming)
+            .unwrap_or(false);
 
         // Extract parameters after &self
         let mut params = Vec::new();
@@ -288,6 +301,7 @@ impl MethodInfo {
             stream_item_type,
             is_override,
             returns_variants,
+            streaming,
         })
     }
 }
