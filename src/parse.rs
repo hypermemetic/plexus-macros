@@ -13,8 +13,6 @@ pub struct HubMethodAttrs {
     pub name: Option<String>,
     /// Parameter descriptions: param_name -> description
     pub param_docs: HashMap<String, String>,
-    /// If true, this method overrides dispatch (returns PlexusStream directly)
-    pub override_call: bool,
     /// Specific enum variants this method can return (for filtered schema generation)
     /// When specified, the return schema will only include these variants from the event enum.
     /// Format: returns(Variant1, Variant2, Error)
@@ -29,7 +27,6 @@ impl Parse for HubMethodAttrs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut name = None;
         let mut param_docs = HashMap::new();
-        let mut override_call = false;
         let mut returns_variants = Vec::new();
         let mut streaming = false;
 
@@ -39,7 +36,17 @@ impl Parse for HubMethodAttrs {
                 match meta {
                     Meta::Path(path) => {
                         if path.is_ident("override_call") {
-                            override_call = true;
+                            // Deprecated: use streaming pattern instead
+                            // e.g., return impl Stream<Item = MyEvent> and forward PlexusStreamItem
+                            // into your event type
+                            return Err(syn::Error::new_spanned(
+                                &path,
+                                "override_call is deprecated. Use the streaming pattern instead:\n\
+                                 - Return `impl Stream<Item = YourEvent>` from the method\n\
+                                 - Forward PlexusStreamItem variants into your event enum\n\
+                                 - Add `streaming` attribute if the method yields multiple events\n\
+                                 See plexus.call implementation for an example.",
+                            ));
                         } else if path.is_ident("streaming") {
                             streaming = true;
                         }
@@ -78,7 +85,7 @@ impl Parse for HubMethodAttrs {
             }
         }
 
-        Ok(HubMethodAttrs { name, param_docs, override_call, returns_variants, streaming })
+        Ok(HubMethodAttrs { name, param_docs, returns_variants, streaming })
     }
 }
 
@@ -202,8 +209,6 @@ pub struct MethodInfo {
     pub params: Vec<ParamInfo>,
     pub return_type: Type,
     pub stream_item_type: Option<Type>,
-    /// True if method has #[hub_method(override_call)] - returns PlexusStream directly
-    pub is_override: bool,
     /// Specific enum variants this method can return (empty = all variants)
     pub returns_variants: Vec<String>,
     /// True if method streams multiple events (from #[hub_method(streaming)])
@@ -232,14 +237,11 @@ impl MethodInfo {
         }
         let description = doc_lines.join(" ");
 
-        // Get param docs, override_call, and returns_variants from hub_method attrs
+        // Get param docs and returns_variants from hub_method attrs
         let param_docs = hub_method_attrs
             .map(|a| &a.param_docs)
             .cloned()
             .unwrap_or_default();
-        let is_override = hub_method_attrs
-            .map(|a| a.override_call)
-            .unwrap_or(false);
         let returns_variants = hub_method_attrs
             .map(|a| a.returns_variants.clone())
             .unwrap_or_default();
@@ -277,16 +279,17 @@ impl MethodInfo {
 
         let stream_item_type = extract_stream_item_type(&return_type);
 
-        // Check for conflicting return type without override_call
-        let looks_like_passthrough = is_result_plexus_stream(&return_type);
-        if looks_like_passthrough && !is_override {
+        // Check for PlexusStream return type - must use streaming pattern instead
+        if is_result_plexus_stream(&return_type) {
             return Err(syn::Error::new_spanned(
                 &method.sig.output,
                 format!(
-                    "Method `{}` returns Result<PlexusStream, _> which conflicts with \
-                    generated wrapping. Add #[hub_macro::hub_method(override_call)] if you \
-                    want to handle dispatch manually, or change return type to \
-                    `impl Stream<Item = T>` for automatic wrapping.",
+                    "Method `{}` returns Result<PlexusStream, _> which bypasses schema generation. \
+                    Use the streaming pattern instead:\n\
+                    - Return `impl Stream<Item = YourEvent>` from the method\n\
+                    - Forward PlexusStreamItem variants into your event enum\n\
+                    - Add `streaming` attribute if the method yields multiple events\n\
+                    See plexus.call implementation for an example.",
                     fn_name
                 ),
             ));
@@ -299,7 +302,6 @@ impl MethodInfo {
             params,
             return_type,
             stream_item_type,
-            is_override,
             returns_variants,
             streaming,
         })
@@ -330,7 +332,7 @@ fn extract_stream_item_type(ty: &Type) -> Option<Type> {
 }
 
 /// Check if return type looks like Result<PlexusStream, _>
-/// This detects types that should use override_call instead of automatic wrapping
+/// This is now rejected - methods should use the streaming pattern instead
 fn is_result_plexus_stream(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
