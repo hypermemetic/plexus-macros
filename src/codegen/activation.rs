@@ -307,104 +307,47 @@ fn generate_rpc_impl_methods(
                 })
                 .collect();
 
-            if m.is_override {
-                // Override method: returns Result<PlexusStream, _> directly
-                // Forward the stream without additional wrapping
-                quote! {
-                    async fn #method_name(
-                        &self,
-                        pending: jsonrpsee::PendingSubscriptionSink,
-                        #(#params_with_types),*
-                    ) -> jsonrpsee::core::SubscriptionResult {
-                        use futures::StreamExt;
+            // All methods use wrap_stream for consistent streaming pattern
+            let content_type = format!("{}.{}", namespace, method_name_str);
 
-                        let sink = pending.accept().await?;
-                        let stream_result = #struct_name::#method_name(self, #(#param_names),*).await;
+            quote! {
+                async fn #method_name(
+                    &self,
+                    pending: jsonrpsee::PendingSubscriptionSink,
+                    #(#params_with_types),*
+                ) -> jsonrpsee::core::SubscriptionResult {
+                    use futures::StreamExt;
 
-                        tokio::spawn(async move {
-                            match stream_result {
-                                Ok(mut stream) => {
-                                    while let Some(item) = stream.next().await {
-                                        if let Ok(raw_value) = serde_json::value::to_raw_value(&item) {
-                                            if sink.send(raw_value).await.is_err() {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    let error = #crate_path::plexus::PlexusStreamItem::Error {
-                                        metadata: #crate_path::plexus::StreamMetadata::new(
-                                            vec![#namespace.into()],
-                                            #crate_path::plexus::PlexusContext::hash(),
-                                        ),
-                                        message: e.to_string(),
-                                        code: None,
-                                        recoverable: false,
-                                    };
-                                    if let Ok(raw_value) = serde_json::value::to_raw_value(&error) {
-                                        let _ = sink.send(raw_value).await;
-                                    }
+                    let sink = pending.accept().await?;
+                    let stream = #struct_name::#method_name(self, #(#param_names),*).await;
+                    let wrapped = #crate_path::plexus::wrap_stream(
+                        stream,
+                        #content_type,
+                        vec![#namespace.into()]
+                    );
+
+                    tokio::spawn(async move {
+                        let mut stream = wrapped;
+                        while let Some(item) = stream.next().await {
+                            if let Ok(raw_value) = serde_json::value::to_raw_value(&item) {
+                                if sink.send(raw_value).await.is_err() {
+                                    break;
                                 }
                             }
-                            // Send done event
-                            let done = #crate_path::plexus::PlexusStreamItem::Done {
-                                metadata: #crate_path::plexus::StreamMetadata::new(
-                                    vec![#namespace.into()],
-                                    #crate_path::plexus::PlexusContext::hash(),
-                                ),
-                            };
-                            if let Ok(raw_value) = serde_json::value::to_raw_value(&done) {
-                                let _ = sink.send(raw_value).await;
-                            }
-                        });
+                        }
+                        // Send done event
+                        let done = #crate_path::plexus::PlexusStreamItem::Done {
+                            metadata: #crate_path::plexus::StreamMetadata::new(
+                                vec![#namespace.into()],
+                                #crate_path::plexus::PlexusContext::hash(),
+                            ),
+                        };
+                        if let Ok(raw_value) = serde_json::value::to_raw_value(&done) {
+                            let _ = sink.send(raw_value).await;
+                        }
+                    });
 
-                        Ok(())
-                    }
-                }
-            } else {
-                // Normal method: wrap with wrap_stream
-                let content_type = format!("{}.{}", namespace, method_name_str);
-
-                quote! {
-                    async fn #method_name(
-                        &self,
-                        pending: jsonrpsee::PendingSubscriptionSink,
-                        #(#params_with_types),*
-                    ) -> jsonrpsee::core::SubscriptionResult {
-                        use futures::StreamExt;
-
-                        let sink = pending.accept().await?;
-                        let stream = #struct_name::#method_name(self, #(#param_names),*).await;
-                        let wrapped = #crate_path::plexus::wrap_stream(
-                            stream,
-                            #content_type,
-                            vec![#namespace.into()]
-                        );
-
-                        tokio::spawn(async move {
-                            let mut stream = wrapped;
-                            while let Some(item) = stream.next().await {
-                                if let Ok(raw_value) = serde_json::value::to_raw_value(&item) {
-                                    if sink.send(raw_value).await.is_err() {
-                                        break;
-                                    }
-                                }
-                            }
-                            // Send done event
-                            let done = #crate_path::plexus::PlexusStreamItem::Done {
-                                metadata: #crate_path::plexus::StreamMetadata::new(
-                                    vec![#namespace.into()],
-                                    #crate_path::plexus::PlexusContext::hash(),
-                                ),
-                            };
-                            if let Ok(raw_value) = serde_json::value::to_raw_value(&done) {
-                                let _ = sink.send(raw_value).await;
-                            }
-                        });
-
-                        Ok(())
-                    }
+                    Ok(())
                 }
             }
         })
@@ -425,27 +368,17 @@ fn generate_dispatch_arms(
             // Generate param extraction code
             let (param_extraction, param_names) = generate_param_extraction(m, crate_path);
 
-            if m.is_override {
-                // Override method: call directly, return Result<PlexusStream, _> as-is
-                quote! {
-                    #method_name => {
-                        #param_extraction
-                        self.#fn_name(#(#param_names),*).await
-                    }
-                }
-            } else {
-                // Normal method: wrap with wrap_stream
-                let content_type = format!("{}.{}", namespace, method_name);
-                quote! {
-                    #method_name => {
-                        #param_extraction
-                        let stream = self.#fn_name(#(#param_names),*).await;
-                        Ok(#crate_path::plexus::wrap_stream(
-                            stream,
-                            #content_type,
-                            vec![#namespace.into()]
-                        ))
-                    }
+            // All methods use wrap_stream for consistent streaming pattern
+            let content_type = format!("{}.{}", namespace, method_name);
+            quote! {
+                #method_name => {
+                    #param_extraction
+                    let stream = self.#fn_name(#(#param_names),*).await;
+                    Ok(#crate_path::plexus::wrap_stream(
+                        stream,
+                        #content_type,
+                        vec![#namespace.into()]
+                    ))
                 }
             }
         })
