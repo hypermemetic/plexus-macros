@@ -92,6 +92,13 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
         })
         .collect();
 
+    // Generate streaming flags for each method
+    // A method is streaming if it has a stream_item_type (returns impl Stream<Item = T>)
+    let streaming_flags: Vec<bool> = methods
+        .iter()
+        .map(|m| m.stream_item_type.is_some())
+        .collect();
+
     quote! {
         /// Auto-generated method enum for schema extraction
         #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -124,6 +131,7 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                 let method_names: &[&str] = &[#(#method_names),*];
                 let descriptions: &[&str] = &[#(#method_descriptions),*];
                 let hashes: &[&str] = &[#(#method_hashes),*];
+                let streaming: &[bool] = &[#(#streaming_flags),*];
                 let return_schemas: Vec<(Option<schemars::Schema>, Vec<&str>)> = vec![#(#return_schema_entries),*];
 
                 // Get the full enum schema and extract each variant
@@ -141,9 +149,10 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                     .iter()
                     .zip(descriptions.iter())
                     .zip(hashes.iter())
+                    .zip(streaming.iter())
                     .zip(return_schemas.into_iter())
                     .enumerate()
-                    .map(|(i, (((name, desc), hash), (returns_opt, variant_filter)))| {
+                    .map(|(i, ((((name, desc), hash), is_streaming), (returns_opt, variant_filter)))| {
                         // Get this variant's schema from oneOf, then extract just the "params" portion
                         // The variant looks like: { properties: { method: {...}, params: {...} }, ... }
                         // We want just the params schema
@@ -175,6 +184,7 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                         if let Some(r) = filtered_returns {
                             schema = schema.with_returns(r);
                         }
+                        schema = schema.with_streaming(*is_streaming);
                         schema
                     })
                     .collect()
