@@ -138,6 +138,10 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                 let full_schema = schemars::schema_for!(#enum_name);
                 let schema_value = serde_json::to_value(&full_schema).expect("Schema should serialize");
 
+                // Extract $defs from the root schema - these need to be merged into each method's params
+                // because types like ConeIdentifier are defined at the root level but referenced via $ref
+                let root_defs = schema_value.get("$defs").cloned();
+
                 // Extract oneOf variants from the schema
                 let one_of = schema_value
                     .get("oneOf")
@@ -155,13 +159,19 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                     .map(|(i, ((((name, desc), hash), is_streaming), (returns_opt, variant_filter)))| {
                         // Get this variant's schema from oneOf, then extract just the "params" portion
                         // The variant looks like: { properties: { method: {...}, params: {...} }, ... }
-                        // We want just the params schema
+                        // We want just the params schema, but we need to merge in $defs from the root
                         let params = one_of.get(i).and_then(|variant| {
                             variant
                                 .get("properties")
                                 .and_then(|props| props.get("params"))
                                 .cloned()
-                                .and_then(|p| serde_json::from_value::<schemars::Schema>(p).ok())
+                                .and_then(|mut p| {
+                                    // Merge root $defs into the params schema so $ref references resolve
+                                    if let (Some(params_obj), Some(defs)) = (p.as_object_mut(), &root_defs) {
+                                        params_obj.insert("$defs".to_string(), defs.clone());
+                                    }
+                                    serde_json::from_value::<schemars::Schema>(p).ok()
+                                })
                         });
 
                         // Filter return schema if variant_filter is specified
