@@ -29,7 +29,8 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                     // Use struct variant for all cases (including single param)
                     // This produces proper object schema with field names
                     // Add description for each field from param_docs or fallback to name
-                    // Add #[serde(default)] for Option<T> fields to make them truly optional
+                    // Add #[serde(default, deserialize_with = "...")] for Option<T> fields
+                    // to make them truly optional and accept explicit null values
                     let fields: Vec<TokenStream> = m
                         .params
                         .iter()
@@ -39,12 +40,15 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                             let desc = p.description.clone()
                                 .unwrap_or_else(|| format!("The {} parameter", name));
 
-                            // Check if type is Option<T> - if so, add #[serde(default)]
+                            // Check if type is Option<T> - if so, add serde attributes
+                            // that handle both missing fields AND explicit null values
                             let is_option = is_option_type(ty);
                             if is_option {
+                                // Always use crate::serde_helpers since consuming crates should
+                                // re-export hub_core::serde_helpers (or define their own)
                                 quote! {
                                     #[schemars(description = #desc)]
-                                    #[serde(default)]
+                                    #[serde(default, deserialize_with = "crate::serde_helpers::deserialize_null_as_none")]
                                     #name: #ty
                                 }
                             } else {

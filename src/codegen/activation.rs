@@ -7,6 +7,9 @@ use uuid::Uuid;
 
 pub fn generate(
     struct_name: &syn::Ident,
+    self_ty: &syn::Type,
+    impl_generics: &syn::ImplGenerics,
+    where_clause: Option<&syn::WhereClause>,
     namespace: &str,
     version: &str,
     description: &str,
@@ -159,12 +162,12 @@ pub fn generate(
 
         // Implement the RPC server trait
         #[async_trait::async_trait]
-        impl #rpc_server_name for #struct_name {
+        impl #impl_generics #rpc_server_name for #self_ty #where_clause {
             #(#rpc_impl_methods)*
         }
 
         #[async_trait::async_trait]
-        impl #crate_path::plexus::Activation for #struct_name {
+        impl #impl_generics #crate_path::plexus::Activation for #self_ty #where_clause {
             type Methods = #enum_name;
 
             #namespace_impl
@@ -398,11 +401,12 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path) -> (
             let is_option = crate::codegen::method_enum::is_option_type(&param.ty);
 
             if is_option {
-                // For Option<T>, missing field = None (not an error)
+                // For Option<T>, missing field OR explicit null = None (not an error)
                 quote! {
                     let #param_name = match &params {
                         serde_json::Value::Object(map) => {
                             map.get(#param_str)
+                                .filter(|v| !v.is_null())  // Treat explicit null as missing
                                 .map(|v| serde_json::from_value(v.clone()))
                                 .transpose()
                                 .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
@@ -442,9 +446,10 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path) -> (
                     let is_option = crate::codegen::method_enum::is_option_type(&p.ty);
 
                     if is_option {
-                        // For Option<T>, missing field = None (not an error)
+                        // For Option<T>, missing field OR explicit null = None (not an error)
                         quote! {
                             let #name = map.get(#name_str)
+                                .filter(|v| !v.is_null())  // Treat explicit null as missing
                                 .map(|v| serde_json::from_value(v.clone()))
                                 .transpose()
                                 .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?;

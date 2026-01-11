@@ -12,7 +12,7 @@ use syn::{ImplItem, ItemImpl, Meta, Type};
 pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Result<TokenStream> {
     let crate_path: syn::Path = syn::parse_str(&args.crate_path)?;
 
-    // Get struct name
+    // Get struct name (ident only, for enum naming)
     let struct_name = match &*input_impl.self_ty {
         Type::Path(type_path) => type_path
             .path
@@ -22,6 +22,10 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             .ok_or_else(|| syn::Error::new_spanned(&input_impl.self_ty, "Expected struct name"))?,
         _ => return Err(syn::Error::new_spanned(&input_impl.self_ty, "Expected struct type")),
     };
+
+    // Get full self type (with generics) and impl generics for trait impl
+    let self_ty = &input_impl.self_ty;
+    let (impl_generics, _, where_clause) = input_impl.generics.split_for_impl();
 
     // Extract all #[hub_method] functions
     let mut methods: Vec<MethodInfo> = Vec::new();
@@ -61,6 +65,9 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     let method_enum = method_enum::generate(&struct_name, &methods, &crate_path);
     let activation_impl = activation::generate(
         &struct_name,
+        self_ty,
+        &impl_generics,
+        where_clause,
         &args.namespace,
         &args.version,
         args.description.as_deref().unwrap_or(&format!("{} activation", args.namespace)),
