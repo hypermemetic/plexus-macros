@@ -115,6 +115,14 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
             pub fn all_method_names() -> &'static [&'static str] {
                 &[#(#method_names),*]
             }
+
+            /// Cached schema value - computed once on first access
+            fn cached_schema() -> &'static serde_json::Value {
+                static SCHEMA_CACHE: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+                SCHEMA_CACHE.get_or_init(|| {
+                    serde_json::to_value(schemars::schema_for!(#enum_name)).expect("Schema should serialize")
+                })
+            }
         }
 
         impl #crate_path::plexus::MethodEnumSchema for #enum_name {
@@ -123,24 +131,34 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
             }
 
             fn schema_with_consts() -> serde_json::Value {
-                // schemars 1.1+ already generates const values for adjacently tagged enums
-                // Just return the schema directly
-                serde_json::to_value(schemars::schema_for!(#enum_name)).expect("Schema should serialize")
+                // Return cached schema (cloned since caller may mutate)
+                Self::cached_schema().clone()
             }
         }
 
         impl #enum_name {
             /// Get per-method schema info including params, return types, and content hashes
+            ///
+            /// Note: This method has O(1) schema lookup cost after first call due to caching.
             pub fn method_schemas() -> Vec<#crate_path::plexus::MethodSchema> {
+                // Cache the computed method schemas for O(1) subsequent calls
+                static METHOD_SCHEMAS_CACHE: std::sync::OnceLock<Vec<#crate_path::plexus::MethodSchema>> = std::sync::OnceLock::new();
+
+                METHOD_SCHEMAS_CACHE.get_or_init(|| {
+                    Self::compute_method_schemas()
+                }).clone()
+            }
+
+            /// Internal: compute method schemas (called once, then cached)
+            fn compute_method_schemas() -> Vec<#crate_path::plexus::MethodSchema> {
                 let method_names: &[&str] = &[#(#method_names),*];
                 let descriptions: &[&str] = &[#(#method_descriptions),*];
                 let hashes: &[&str] = &[#(#method_hashes),*];
                 let streaming: &[bool] = &[#(#streaming_flags),*];
                 let return_schemas: Vec<(Option<schemars::Schema>, Vec<&str>)> = vec![#(#return_schema_entries),*];
 
-                // Get the full enum schema and extract each variant
-                let full_schema = schemars::schema_for!(#enum_name);
-                let schema_value = serde_json::to_value(&full_schema).expect("Schema should serialize");
+                // Get the cached full enum schema
+                let schema_value = Self::cached_schema();
 
                 // Extract $defs from the root schema - these need to be merged into each method's params
                 // because types like ConeIdentifier are defined at the root level but referenced via $ref
@@ -153,7 +171,7 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                     .cloned()
                     .unwrap_or_default();
 
-                method_names
+                let mut methods: Vec<_> = method_names
                     .iter()
                     .zip(descriptions.iter())
                     .zip(hashes.iter())
@@ -201,7 +219,17 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                         schema = schema.with_streaming(*is_streaming);
                         schema
                     })
-                    .collect()
+                    .collect::<Vec<_>>();
+
+                // Add the auto-generated schema method
+                let schema_method = #crate_path::plexus::MethodSchema::new(
+                    "schema".to_string(),
+                    "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.".to_string(),
+                    "auto_schema".to_string(), // Fixed hash since it's auto-generated
+                );
+                methods.push(schema_method);
+
+                methods
             }
 
             /// Filter a return schema to only include specified variants
