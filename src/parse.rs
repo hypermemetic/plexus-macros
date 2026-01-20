@@ -207,6 +207,8 @@ pub struct MethodInfo {
     pub method_name: String,
     pub description: String,
     pub params: Vec<ParamInfo>,
+    /// Return type - reserved for future protocol schema generation
+    #[allow(dead_code)]
     pub return_type: Type,
     pub stream_item_type: Option<Type>,
     /// Specific enum variants this method can return (empty = all variants)
