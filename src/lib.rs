@@ -24,6 +24,7 @@
 //! - Return type schema from Stream Item type
 
 mod codegen;
+mod handle_enum;
 mod parse;
 mod stream_event;
 
@@ -289,4 +290,55 @@ pub fn hub_methods(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_derive(StreamEvent, attributes(stream_event, terminal))]
 pub fn stream_event_derive(input: TokenStream) -> TokenStream {
     stream_event::derive(input)
+}
+
+/// Derive macro for type-safe handle creation and parsing.
+///
+/// Generates:
+/// - `to_handle(&self) -> Handle` - converts enum variant to Handle
+/// - `impl TryFrom<&Handle>` - parses Handle back to enum variant
+/// - `impl From<EnumName> for Handle` - convenience conversion
+///
+/// # Attributes
+///
+/// Enum-level (required):
+/// - `plugin_id = "CONSTANT_NAME"` - Name of the constant holding the plugin UUID
+/// - `version = "1.0.0"` - Semantic version for handles
+/// - `crate_path = "..."` (optional, default: "hub_core") - Path to hub_core crate
+///
+/// Variant-level:
+/// - `method = "..."` (required) - The handle.method value
+/// - `table = "..."` (optional) - SQLite table name (for future resolution)
+/// - `key = "..."` (optional) - Primary key column (for future resolution)
+///
+/// # Example
+///
+/// ```ignore
+/// use hub_macro::HandleEnum;
+/// use uuid::Uuid;
+///
+/// pub const MY_PLUGIN_ID: Uuid = uuid::uuid!("550e8400-e29b-41d4-a716-446655440000");
+///
+/// #[derive(HandleEnum)]
+/// #[handle(plugin_id = "MY_PLUGIN_ID", version = "1.0.0")]
+/// pub enum MyPluginHandle {
+///     #[handle(method = "event", table = "events", key = "id")]
+///     Event { event_id: String },
+///
+///     #[handle(method = "message")]
+///     Message { message_id: String, role: String },
+/// }
+///
+/// // Usage:
+/// let handle_enum = MyPluginHandle::Event { event_id: "evt-123".into() };
+/// let handle: Handle = handle_enum.to_handle();
+/// // handle.method == "event"
+/// // handle.meta == ["evt-123"]
+///
+/// // Parsing back:
+/// let parsed = MyPluginHandle::try_from(&handle)?;
+/// ```
+#[proc_macro_derive(HandleEnum, attributes(handle))]
+pub fn handle_enum_derive(input: TokenStream) -> TokenStream {
+    handle_enum::derive(input)
 }

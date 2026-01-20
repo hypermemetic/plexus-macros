@@ -1,6 +1,6 @@
 [package]
 name = "hub-macro"
-version = "0.2.0"
+version = "0.2.1-worktree"
 edition = "2021"
 license = "MIT"
 description = "Proc macros for hub method definitions with session types"
@@ -15,10 +15,12 @@ syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
 uuid = { version = "1.0", features = ["v5"] }
 
 [dev-dependencies]
-substrate = { path = "../substrate", package = "substrate-hub" }
+substrate = { path = "..", package = "substrate-hub" }
+hub-core = { path = "../hub-core" }
 dialectic = { version = "0.4.1", features = ["tokio"] }
 schemars = { version = "1.0.4", features = ["derive", "uuid1"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 trybuild = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
 
