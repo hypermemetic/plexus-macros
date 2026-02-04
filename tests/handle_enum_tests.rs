@@ -1,6 +1,6 @@
 //! Tests for HandleEnum derive macro
 
-use hub_core::Handle;
+use plexus_core::Handle;
 use hub_macro::HandleEnum;
 use uuid::Uuid;
 

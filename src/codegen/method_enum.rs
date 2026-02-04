@@ -45,7 +45,7 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                             let is_option = is_option_type(ty);
                             if is_option {
                                 // Always use crate::serde_helpers since consuming crates should
-                                // re-export hub_core::serde_helpers (or define their own)
+                                // re-export plexus_core::serde_helpers (or define their own)
                                 quote! {
                                     #[schemars(description = #desc)]
                                     #[serde(default, deserialize_with = "crate::serde_helpers::deserialize_null_as_none")]

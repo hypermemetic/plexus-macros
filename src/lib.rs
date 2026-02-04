@@ -304,7 +304,7 @@ pub fn stream_event_derive(input: TokenStream) -> TokenStream {
 /// Enum-level (required):
 /// - `plugin_id = "CONSTANT_NAME"` - Name of the constant holding the plugin UUID
 /// - `version = "1.0.0"` - Semantic version for handles
-/// - `crate_path = "..."` (optional, default: "hub_core") - Path to hub_core crate
+/// - `crate_path = "..."` (optional, default: "plexus_core") - Path to plexus_core crate
 ///
 /// Variant-level:
 /// - `method = "..."` (required) - The handle.method value

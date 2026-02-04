@@ -45,7 +45,7 @@ struct HandleEnumAttrs {
     plugin_id: String,
     /// Semantic version for handles (e.g., "1.0.0")
     version: String,
-    /// Base crate path for imports (default: "hub_core")
+    /// Base crate path for imports (default: "plexus_core")
     crate_path: String,
 }
 
@@ -53,7 +53,7 @@ impl Parse for HandleEnumAttrs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut plugin_id = None;
         let mut version = None;
-        let mut crate_path = "hub_core".to_string();
+        let mut crate_path = "plexus_core".to_string();
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -351,7 +351,7 @@ fn generate_to_handle_arms(
                 // Unit-like variant with #[handle]
                 quote! {
                     Self::#variant_name => {
-                        hub_core::Handle::new(#plugin_id_ident, #version, #method)
+                        plexus_core::Handle::new(#plugin_id_ident, #version, #method)
                     }
                 }
             } else {
@@ -368,7 +368,7 @@ fn generate_to_handle_arms(
 
                 quote! {
                     Self::#variant_name { #(#field_names),* } => {
-                        hub_core::Handle::new(#plugin_id_ident, #version, #method)
+                        plexus_core::Handle::new(#plugin_id_ident, #version, #method)
                             .with_meta(vec![#(#field_clones),*])
                     }
                 }
