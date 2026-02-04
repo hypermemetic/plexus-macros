@@ -1,4 +1,4 @@
-//! Attribute parsing for hub macros
+//! Attribute parsing for Plexus RPC macros
 
 use std::collections::HashMap;
 use syn::{
