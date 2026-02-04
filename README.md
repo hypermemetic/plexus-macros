@@ -1,4 +1,4 @@
-# hub-macro
+# plexus-macros
 
 Procedural macros for Plexus RPC activations.
 

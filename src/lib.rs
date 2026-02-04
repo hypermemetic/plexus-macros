@@ -1,6 +1,6 @@
-//! Hub Method Macro
+//! Plexus RPC Method Macro
 //!
-//! Proc macro for defining hub methods where the function signature IS the schema.
+//! Proc macro for defining Plexus RPC methods where the function signature IS the schema.
 //!
 //! # Example
 //!

@@ -71,12 +71,19 @@ pub fn generate(
     };
 
     // Generate plugin_schema body - hub vs leaf, with or without long_description
+    // When namespace_fn is set, use self.namespace() for runtime namespace
+    let namespace_expr = if namespace_fn.is_some() {
+        quote! { self.namespace() }
+    } else {
+        quote! { #namespace }
+    };
+
     let plugin_schema_body = match (hub, long_description) {
         (true, Some(long_desc)) => {
             // Hub with long description
             quote! {
                 #crate_path::plexus::PluginSchema::hub_with_long_description(
-                    #namespace,
+                    #namespace_expr,
                     #version,
                     #description,
                     #long_desc,
@@ -89,7 +96,7 @@ pub fn generate(
             // Hub without long description
             quote! {
                 #crate_path::plexus::PluginSchema::hub(
-                    #namespace,
+                    #namespace_expr,
                     #version,
                     #description,
                     #enum_name::method_schemas(),
@@ -101,7 +108,7 @@ pub fn generate(
             // Leaf with long description
             quote! {
                 #crate_path::plexus::PluginSchema::leaf_with_long_description(
-                    #namespace,
+                    #namespace_expr,
                     #version,
                     #description,
                     #long_desc,
@@ -113,7 +120,7 @@ pub fn generate(
             // Leaf without long description
             quote! {
                 #crate_path::plexus::PluginSchema::leaf(
-                    #namespace,
+                    #namespace_expr,
                     #version,
                     #description,
                     #enum_name::method_schemas(),

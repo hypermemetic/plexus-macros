@@ -1,4 +1,4 @@
-//! Code generation for hub macros
+//! Code generation for Plexus RPC macros
 
 mod activation;
 mod method_enum;
