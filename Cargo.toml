@@ -1,5 +1,5 @@
 [package]
-name = "hub-macro"
+name = "plexus-macros"
 version = "0.2.1-worktree"
 edition = "2021"
 license = "MIT"
@@ -16,7 +16,7 @@ uuid = { version = "1.0", features = ["v5"] }
 
 [dev-dependencies]
 substrate = { path = "..", package = "substrate-hub" }
-hub-core = { path = "../hub-core" }
+plexus-core = { path = "../hub-core" }
 dialectic = { version = "0.4.1", features = ["tokio"] }
 schemars = { version = "1.0.4", features = ["derive", "uuid1"] }
 serde = { version = "1.0", features = ["derive"] }
