@@ -3,7 +3,7 @@ name = "hub-macro"
 version = "0.2.1-worktree"
 edition = "2021"
 license = "MIT"
-description = "Proc macros for hub method definitions with session types"
+description = "Procedural macros for Plexus RPC activations"
 
 [lib]
 proc-macro = true
