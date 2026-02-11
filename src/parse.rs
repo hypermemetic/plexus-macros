@@ -95,7 +95,8 @@ const MAX_DESCRIPTION_WORDS: usize = 15;
 /// Parsed attributes for #[hub_methods]
 pub struct HubMethodsAttrs {
     pub namespace: String,
-    pub version: String,
+    /// Explicit version string, or None to use CARGO_PKG_VERSION at compile time
+    pub version: Option<String>,
     /// Short description (max 15 words)
     pub description: Option<String>,
     /// Long description (optional, for detailed documentation)
@@ -116,7 +117,7 @@ pub struct HubMethodsAttrs {
 impl Parse for HubMethodsAttrs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut namespace = String::new();
-        let mut version = "1.0.0".to_string();
+        let mut version: Option<String> = None;
         let mut description = None;
         let mut long_description = None;
         let mut crate_path = "crate".to_string();
@@ -135,7 +136,7 @@ impl Parse for HubMethodsAttrs {
                             if path.is_ident("namespace") {
                                 namespace = s.value();
                             } else if path.is_ident("version") {
-                                version = s.value();
+                                version = Some(s.value());
                             } else if path.is_ident("description") {
                                 let desc = s.value();
                                 // Validate word count
