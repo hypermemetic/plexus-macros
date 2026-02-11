@@ -11,7 +11,7 @@ pub fn generate(
     impl_generics: &syn::ImplGenerics,
     where_clause: Option<&syn::WhereClause>,
     namespace: &str,
-    version: &str,
+    version: Option<&str>,
     description: &str,
     long_description: Option<&str>,
     methods: &[MethodInfo],
@@ -70,6 +70,34 @@ pub fn generate(
         }
     };
 
+    // Generate version expression - either a literal string or env!("CARGO_PKG_VERSION")
+    let version_expr = match version {
+        Some(v) => quote! { #v },
+        None => quote! { env!("CARGO_PKG_VERSION") },
+    };
+
+    // Resolve version string for UUID generation (needs a concrete value at proc-macro time)
+    let version_for_uuid = version
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| {
+            // Read the calling crate's Cargo.toml to get the version
+            std::env::var("CARGO_MANIFEST_DIR")
+                .ok()
+                .and_then(|dir| {
+                    let cargo_toml = std::path::Path::new(&dir).join("Cargo.toml");
+                    std::fs::read_to_string(cargo_toml).ok()
+                })
+                .and_then(|content| {
+                    // Simple parse: find version = "x.y.z"
+                    content.lines()
+                        .find(|line| line.trim().starts_with("version"))
+                        .and_then(|line| {
+                            line.split('"').nth(1).map(|s| s.to_string())
+                        })
+                })
+                .unwrap_or_else(|| "0.0.0".to_string())
+        });
+
     // Generate plugin_schema body - hub vs leaf, with or without long_description
     // When namespace_fn is set, use self.namespace() for runtime namespace
     let namespace_expr = if namespace_fn.is_some() {
@@ -84,7 +112,7 @@ pub fn generate(
             quote! {
                 #crate_path::plexus::PluginSchema::hub_with_long_description(
                     #namespace_expr,
-                    #version,
+                    #version_expr,
                     #description,
                     #long_desc,
                     #enum_name::method_schemas(),
@@ -97,7 +125,7 @@ pub fn generate(
             quote! {
                 #crate_path::plexus::PluginSchema::hub(
                     #namespace_expr,
-                    #version,
+                    #version_expr,
                     #description,
                     #enum_name::method_schemas(),
                     self.plugin_children(),
@@ -109,7 +137,7 @@ pub fn generate(
             quote! {
                 #crate_path::plexus::PluginSchema::leaf_with_long_description(
                     #namespace_expr,
-                    #version,
+                    #version_expr,
                     #description,
                     #long_desc,
                     #enum_name::method_schemas(),
@@ -121,7 +149,7 @@ pub fn generate(
             quote! {
                 #crate_path::plexus::PluginSchema::leaf(
                     #namespace_expr,
-                    #version,
+                    #version_expr,
                     #description,
                     #enum_name::method_schemas(),
                 )
@@ -135,7 +163,7 @@ pub fn generate(
         .map(|s| s.to_string())
         .unwrap_or_else(|| {
             // Extract major version (first component before '.')
-            let major_version = version.split('.').next().unwrap_or("0");
+            let major_version = version_for_uuid.split('.').next().unwrap_or("0");
             // Generate deterministic UUID v5 from namespace@major_version
             let name = format!("{}@{}", namespace, major_version);
             Uuid::new_v5(&Uuid::NAMESPACE_OID, name.as_bytes()).to_string()
@@ -178,7 +206,7 @@ pub fn generate(
             type Methods = #enum_name;
 
             #namespace_impl
-            fn version(&self) -> &str { #version }
+            fn version(&self) -> &str { #version_expr }
             fn description(&self) -> &str { #description }
             #long_description_impl
 
