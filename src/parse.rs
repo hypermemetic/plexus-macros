@@ -378,9 +378,14 @@ impl MethodInfo {
 }
 
 /// Extract BidirChannel type parameters from a type like &BidirChannel<Req, Resp>
+/// Handles various forms:
+/// - &BidirChannel<Req, Resp>
+/// - &Arc<BidirChannel<Req, Resp>>
+/// - &StandardBidirChannel
+/// - &Arc<StandardBidirChannel>
 /// Returns BidirType::Custom if custom types found, BidirType::Standard if StandardBidirChannel
 fn extract_bidir_channel_types(ty: &Type) -> Option<BidirType> {
-    // Handle &BidirChannel<...> or &StandardBidirChannel
+    // Handle &T
     let inner_ty = if let Type::Reference(type_ref) = ty {
         &*type_ref.elem
     } else {
@@ -388,6 +393,29 @@ fn extract_bidir_channel_types(ty: &Type) -> Option<BidirType> {
     };
 
     if let Type::Path(type_path) = inner_ty {
+        let last_segment = type_path.path.segments.last()?;
+
+        // Check for Arc<...> wrapper
+        if last_segment.ident == "Arc" {
+            if let PathArguments::AngleBracketed(args) = &last_segment.arguments {
+                if let Some(GenericArgument::Type(inner)) = args.args.first() {
+                    // Recursively check the inner type
+                    return extract_bidir_from_path(inner);
+                }
+            }
+            return None;
+        }
+
+        // Check direct type (no Arc)
+        return extract_bidir_from_path(inner_ty);
+    }
+
+    None
+}
+
+/// Extract BidirType from a path type (BidirChannel or StandardBidirChannel)
+fn extract_bidir_from_path(ty: &Type) -> Option<BidirType> {
+    if let Type::Path(type_path) = ty {
         let last_segment = type_path.path.segments.last()?;
 
         // Check for StandardBidirChannel (type alias)
