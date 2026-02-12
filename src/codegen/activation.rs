@@ -369,6 +369,8 @@ fn generate_dispatch_arms(
     namespace: &str,
     crate_path: &syn::Path,
 ) -> Vec<TokenStream> {
+    use crate::parse::BidirType;
+
     methods
         .iter()
         .map(|m| {
@@ -378,12 +380,61 @@ fn generate_dispatch_arms(
             // Generate param extraction code
             let (param_extraction, param_names) = generate_param_extraction(m, crate_path);
 
+            // Generate bidirectional channel setup and call based on bidir type
+            let (bidir_setup, method_call) = match &m.bidirectional {
+                BidirType::None => {
+                    // No bidirectional - normal call
+                    (quote! {}, quote! { self.#fn_name(#(#param_names),*).await })
+                }
+                BidirType::Standard => {
+                    // StandardBidirChannel
+                    (
+                        quote! {
+                            // Create StandardBidirChannel (TODO: get bidirectional_supported from context)
+                            let (tx, _rx) = tokio::sync::mpsc::channel(32);
+                            let ctx = std::sync::Arc::new(#crate_path::plexus::BidirChannel::<
+                                #crate_path::plexus::StandardRequest,
+                                #crate_path::plexus::StandardResponse,
+                            >::new(
+                                tx,
+                                false, // TODO WS6: get from transport context
+                                vec![#namespace.into()],
+                                #crate_path::plexus::PlexusContext::hash(),
+                            ));
+                        },
+                        quote! { self.#fn_name(&ctx, #(#param_names),*).await }
+                    )
+                }
+                BidirType::Custom { request, response } => {
+                    // Custom BidirChannel
+                    let req_ty: syn::Type = syn::parse_str(request).unwrap_or_else(|_| syn::parse_quote!(()));
+                    let resp_ty: syn::Type = syn::parse_str(response).unwrap_or_else(|_| syn::parse_quote!(()));
+                    (
+                        quote! {
+                            // Create custom BidirChannel (TODO: get bidirectional_supported from context)
+                            let (tx, _rx) = tokio::sync::mpsc::channel(32);
+                            let ctx = std::sync::Arc::new(#crate_path::plexus::BidirChannel::<
+                                #req_ty,
+                                #resp_ty,
+                            >::new(
+                                tx,
+                                false, // TODO WS6: get from transport context
+                                vec![#namespace.into()],
+                                #crate_path::plexus::PlexusContext::hash(),
+                            ));
+                        },
+                        quote! { self.#fn_name(&ctx, #(#param_names),*).await }
+                    )
+                }
+            };
+
             // All methods use wrap_stream for consistent streaming pattern
             let content_type = format!("{}.{}", namespace, method_name);
             quote! {
                 #method_name => {
+                    #bidir_setup
                     #param_extraction
-                    let stream = self.#fn_name(#(#param_names),*).await;
+                    let stream = #method_call;
                     Ok(#crate_path::plexus::wrap_stream(
                         stream,
                         #content_type,

@@ -8,6 +8,17 @@ use syn::{
     PathArguments, ReturnType, Token, Type,
 };
 
+/// Bidirectional channel type configuration
+#[derive(Debug, Clone)]
+pub enum BidirType {
+    /// Not bidirectional
+    None,
+    /// Use StandardBidirChannel (StandardRequest, StandardResponse)
+    Standard,
+    /// Use custom request/response types
+    Custom { request: String, response: String },
+}
+
 /// Parsed attributes for #[hub_method]
 pub struct HubMethodAttrs {
     pub name: Option<String>,
@@ -21,6 +32,8 @@ pub struct HubMethodAttrs {
     /// If false (default), it yields a single result.
     /// Used to determine client API: streaming -> AsyncGenerator, non-streaming -> Promise
     pub streaming: bool,
+    /// Bidirectional channel type (from #[hub_method(bidirectional)] or #[hub_method(bidirectional(request = "...", response = "..."))])
+    pub bidirectional: BidirType,
 }
 
 impl Parse for HubMethodAttrs {
@@ -29,6 +42,7 @@ impl Parse for HubMethodAttrs {
         let mut param_docs = HashMap::new();
         let mut returns_variants = Vec::new();
         let mut streaming = false;
+        let mut bidirectional = BidirType::None;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -49,6 +63,8 @@ impl Parse for HubMethodAttrs {
                             ));
                         } else if path.is_ident("streaming") {
                             streaming = true;
+                        } else if path.is_ident("bidirectional") {
+                            bidirectional = BidirType::Standard;
                         }
                     }
                     Meta::NameValue(MetaNameValue { path, value, .. }) => {
@@ -79,13 +95,44 @@ impl Parse for HubMethodAttrs {
                             for ident in nested {
                                 returns_variants.push(ident.to_string());
                             }
+                        } else if path.is_ident("bidirectional") {
+                            // Parse bidirectional(request = "MyReq", response = "MyResp")
+                            let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
+                            let nested = syn::parse::Parser::parse2(parser, tokens.clone())?;
+
+                            let mut request = None;
+                            let mut response = None;
+
+                            for meta in nested {
+                                if let Meta::NameValue(MetaNameValue { path, value, .. }) = meta {
+                                    if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
+                                        if path.is_ident("request") {
+                                            request = Some(s.value());
+                                        } else if path.is_ident("response") {
+                                            response = Some(s.value());
+                                        }
+                                    }
+                                }
+                            }
+
+                            match (request, response) {
+                                (Some(req), Some(resp)) => {
+                                    bidirectional = BidirType::Custom { request: req, response: resp };
+                                }
+                                _ => {
+                                    return Err(syn::Error::new_spanned(
+                                        &path,
+                                        "bidirectional(...) requires both request and response parameters: bidirectional(request = \"MyReq\", response = \"MyResp\")"
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
             }
         }
 
-        Ok(HubMethodAttrs { name, param_docs, returns_variants, streaming })
+        Ok(HubMethodAttrs { name, param_docs, returns_variants, streaming, bidirectional })
     }
 }
 
@@ -216,6 +263,8 @@ pub struct MethodInfo {
     /// True if method streams multiple events (from #[hub_method(streaming)])
     /// False (default) means method yields a single result
     pub streaming: bool,
+    /// Bidirectional channel type (from attribute or inferred from parameter type)
+    pub bidirectional: BidirType,
 }
 
 impl MethodInfo {
@@ -251,6 +300,11 @@ impl MethodInfo {
             .map(|a| a.streaming)
             .unwrap_or(false);
 
+        // Get bidirectional from attribute (may be overridden by parameter type inference)
+        let mut bidirectional = hub_method_attrs
+            .map(|a| a.bidirectional.clone())
+            .unwrap_or(BidirType::None);
+
         // Extract parameters after &self
         let mut params = Vec::new();
         for arg in &method.sig.inputs {
@@ -258,6 +312,18 @@ impl MethodInfo {
                 if let Pat::Ident(ident) = &*pat_type.pat {
                     let name = ident.ident.clone();
                     let name_str = name.to_string();
+
+                    // Check if this is a bidirectional context parameter
+                    // Detect ctx: &BidirChannel<Req, Resp> or ctx: &StandardBidirChannel
+                    if name_str == "ctx" || name_str == "context" {
+                        if let Some(bidir_types) = extract_bidir_channel_types(&pat_type.ty) {
+                            // Infer bidirectional type from parameter
+                            bidirectional = bidir_types;
+                            // Don't include ctx in params (it's provided by framework)
+                            continue;
+                        }
+                    }
+
                     let description = param_docs.get(&name_str).cloned();
                     params.push(ParamInfo {
                         name,
@@ -306,7 +372,71 @@ impl MethodInfo {
             stream_item_type,
             returns_variants,
             streaming,
+            bidirectional,
         })
+    }
+}
+
+/// Extract BidirChannel type parameters from a type like &BidirChannel<Req, Resp>
+/// Returns BidirType::Custom if custom types found, BidirType::Standard if StandardBidirChannel
+fn extract_bidir_channel_types(ty: &Type) -> Option<BidirType> {
+    // Handle &BidirChannel<...> or &StandardBidirChannel
+    let inner_ty = if let Type::Reference(type_ref) = ty {
+        &*type_ref.elem
+    } else {
+        ty
+    };
+
+    if let Type::Path(type_path) = inner_ty {
+        let last_segment = type_path.path.segments.last()?;
+
+        // Check for StandardBidirChannel (type alias)
+        if last_segment.ident == "StandardBidirChannel" {
+            return Some(BidirType::Standard);
+        }
+
+        // Check for BidirChannel<Req, Resp>
+        if last_segment.ident == "BidirChannel" {
+            if let PathArguments::AngleBracketed(args) = &last_segment.arguments {
+                let args_vec: Vec<_> = args.args.iter().collect();
+                if args_vec.len() == 2 {
+                    // Extract Req and Resp type names
+                    if let (GenericArgument::Type(req_ty), GenericArgument::Type(resp_ty)) =
+                        (args_vec[0], args_vec[1])
+                    {
+                        let req_name = type_to_string(req_ty);
+                        let resp_name = type_to_string(resp_ty);
+
+                        // Check if it's StandardRequest/StandardResponse
+                        if req_name == "StandardRequest" && resp_name == "StandardResponse" {
+                            return Some(BidirType::Standard);
+                        }
+
+                        return Some(BidirType::Custom {
+                            request: req_name,
+                            response: resp_name,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Convert a Type to its string representation (simple path types only)
+fn type_to_string(ty: &Type) -> String {
+    if let Type::Path(type_path) = ty {
+        type_path
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::")
+    } else {
+        format!("{:?}", ty)
     }
 }
 
