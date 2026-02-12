@@ -300,6 +300,8 @@ fn generate_rpc_impl_methods(
     namespace: &str,
     crate_path: &syn::Path,
 ) -> Vec<TokenStream> {
+    use crate::parse::BidirType;
+
     methods
         .iter()
         .map(|m| {
@@ -317,6 +319,49 @@ fn generate_rpc_impl_methods(
                 })
                 .collect();
 
+            // Generate bidirectional channel setup and method call based on bidir type
+            let (bidir_setup, method_call) = match &m.bidirectional {
+                BidirType::None => {
+                    (quote! {}, quote! { #struct_name::#method_name(self, #(#param_names),*).await })
+                }
+                BidirType::Standard => {
+                    (
+                        quote! {
+                            let (tx, _rx) = tokio::sync::mpsc::channel(32);
+                            let ctx = std::sync::Arc::new(#crate_path::plexus::BidirChannel::<
+                                #crate_path::plexus::StandardRequest,
+                                #crate_path::plexus::StandardResponse,
+                            >::new(
+                                tx,
+                                false,
+                                vec![#namespace.into()],
+                                #crate_path::plexus::PlexusContext::hash(),
+                            ));
+                        },
+                        quote! { #struct_name::#method_name(self, &ctx, #(#param_names),*).await }
+                    )
+                }
+                BidirType::Custom { request, response } => {
+                    let req_ty: syn::Type = syn::parse_str(request).unwrap_or_else(|_| syn::parse_quote!(()));
+                    let resp_ty: syn::Type = syn::parse_str(response).unwrap_or_else(|_| syn::parse_quote!(()));
+                    (
+                        quote! {
+                            let (tx, _rx) = tokio::sync::mpsc::channel(32);
+                            let ctx = std::sync::Arc::new(#crate_path::plexus::BidirChannel::<
+                                #req_ty,
+                                #resp_ty,
+                            >::new(
+                                tx,
+                                false,
+                                vec![#namespace.into()],
+                                #crate_path::plexus::PlexusContext::hash(),
+                            ));
+                        },
+                        quote! { #struct_name::#method_name(self, &ctx, #(#param_names),*).await }
+                    )
+                }
+            };
+
             // All methods use wrap_stream for consistent streaming pattern
             let content_type = format!("{}.{}", namespace, method_name_str);
 
@@ -329,7 +374,8 @@ fn generate_rpc_impl_methods(
                     use futures::StreamExt;
 
                     let sink = pending.accept().await?;
-                    let stream = #struct_name::#method_name(self, #(#param_names),*).await;
+                    #bidir_setup
+                    let stream = #method_call;
                     let wrapped = #crate_path::plexus::wrap_stream(
                         stream,
                         #content_type,
