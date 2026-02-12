@@ -426,66 +426,73 @@ fn generate_dispatch_arms(
             // Generate param extraction code
             let (param_extraction, param_names) = generate_param_extraction(m, crate_path);
 
-            // Generate bidirectional channel setup and call based on bidir type
-            let (bidir_setup, method_call) = match &m.bidirectional {
+            let content_type = format!("{}.{}", namespace, method_name);
+
+            // Generate code based on bidirectional type
+            match &m.bidirectional {
                 BidirType::None => {
-                    // No bidirectional - normal call
-                    (quote! {}, quote! { self.#fn_name(#(#param_names),*).await })
+                    // No bidirectional - simple wrap_stream
+                    quote! {
+                        #method_name => {
+                            #param_extraction
+                            let stream = self.#fn_name(#(#param_names),*).await;
+                            Ok(#crate_path::plexus::wrap_stream(
+                                stream,
+                                #content_type,
+                                vec![#namespace.into()]
+                            ))
+                        }
+                    }
                 }
                 BidirType::Standard => {
-                    // StandardBidirChannel
-                    (
-                        quote! {
-                            // Create StandardBidirChannel (TODO: get bidirectional_supported from context)
-                            let (tx, _rx) = tokio::sync::mpsc::channel(32);
-                            let ctx = std::sync::Arc::new(#crate_path::plexus::BidirChannel::<
+                    // StandardBidirChannel - use wrap_stream_with_bidir
+                    quote! {
+                        #method_name => {
+                            #param_extraction
+                            // Create bidir channel and wrap stream together
+                            let (ctx, wrap_fn) = #crate_path::plexus::create_bidir_stream::<
                                 #crate_path::plexus::StandardRequest,
                                 #crate_path::plexus::StandardResponse,
-                            >::new(
-                                tx,
-                                false, // TODO WS6: get from transport context
-                                vec![#namespace.into()],
-                                #crate_path::plexus::PlexusContext::hash(),
-                            ));
-                        },
-                        quote! { self.#fn_name(&ctx, #(#param_names),*).await }
-                    )
+                            >(#content_type, vec![#namespace.into()]);
+
+                            // Call the method with the bidir channel
+                            let user_stream = self.#fn_name(&ctx, #(#param_names),*).await;
+
+                            // Wrap the user's stream and merge with bidir requests
+                            let wrapped_user = #crate_path::plexus::wrap_stream(
+                                user_stream,
+                                #content_type,
+                                vec![#namespace.into()]
+                            );
+                            Ok(wrap_fn(wrapped_user))
+                        }
+                    }
                 }
                 BidirType::Custom { request, response } => {
-                    // Custom BidirChannel
+                    // Custom BidirChannel - use wrap_stream_with_bidir with custom types
                     let req_ty: syn::Type = syn::parse_str(request).unwrap_or_else(|_| syn::parse_quote!(()));
                     let resp_ty: syn::Type = syn::parse_str(response).unwrap_or_else(|_| syn::parse_quote!(()));
-                    (
-                        quote! {
-                            // Create custom BidirChannel (TODO: get bidirectional_supported from context)
-                            let (tx, _rx) = tokio::sync::mpsc::channel(32);
-                            let ctx = std::sync::Arc::new(#crate_path::plexus::BidirChannel::<
+                    quote! {
+                        #method_name => {
+                            #param_extraction
+                            // Create bidir channel and wrap stream together
+                            let (ctx, wrap_fn) = #crate_path::plexus::create_bidir_stream::<
                                 #req_ty,
                                 #resp_ty,
-                            >::new(
-                                tx,
-                                false, // TODO WS6: get from transport context
-                                vec![#namespace.into()],
-                                #crate_path::plexus::PlexusContext::hash(),
-                            ));
-                        },
-                        quote! { self.#fn_name(&ctx, #(#param_names),*).await }
-                    )
-                }
-            };
+                            >(#content_type, vec![#namespace.into()]);
 
-            // All methods use wrap_stream for consistent streaming pattern
-            let content_type = format!("{}.{}", namespace, method_name);
-            quote! {
-                #method_name => {
-                    #bidir_setup
-                    #param_extraction
-                    let stream = #method_call;
-                    Ok(#crate_path::plexus::wrap_stream(
-                        stream,
-                        #content_type,
-                        vec![#namespace.into()]
-                    ))
+                            // Call the method with the bidir channel
+                            let user_stream = self.#fn_name(&ctx, #(#param_names),*).await;
+
+                            // Wrap the user's stream and merge with bidir requests
+                            let wrapped_user = #crate_path::plexus::wrap_stream(
+                                user_stream,
+                                #content_type,
+                                vec![#namespace.into()]
+                            );
+                            Ok(wrap_fn(wrapped_user))
+                        }
+                    }
                 }
             }
         })
