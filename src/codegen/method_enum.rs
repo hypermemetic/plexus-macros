@@ -1,6 +1,6 @@
 //! Generate method enum from hub methods
 
-use crate::parse::MethodInfo;
+use crate::parse::{BidirType, MethodInfo};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::collections::hash_map::DefaultHasher;
@@ -102,6 +102,50 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
         .iter()
         .map(|m| m.streaming)
         .collect();
+
+    // Generate bidirectional schema setup calls and their method indices.
+    //
+    // Each entry is a (index, TokenStream) pair where the TokenStream fragment
+    // applies the appropriate `.with_*` builder calls to configure the
+    // MethodSchema for bidirectional communication.
+    //
+    // - BidirType::None     → empty fragment (no-op; skipped via index filter)
+    // - BidirType::Standard → `schema = schema.with_standard_bidirectional();`
+    // - BidirType::Custom   → `schema = schema.with_bidirectional(true)
+    //                           .with_request_type(schemars::schema_for!(Req).into())
+    //                           .with_response_type(schemars::schema_for!(Resp).into());`
+    //
+    // Both `bidir_index` and `bidir_schema_calls` are zipped together in the
+    // generated `match i { #bidir_index => { #bidir_schema_calls } }` block.
+    let (bidir_index, bidir_schema_calls): (Vec<_>, Vec<_>) = methods
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, m)| {
+            let idx_lit = proc_macro2::Literal::usize_suffixed(idx);
+            match &m.bidirectional {
+                BidirType::None => None,
+                BidirType::Standard => Some((
+                    quote! { #idx_lit },
+                    quote! { schema = schema.with_standard_bidirectional(); },
+                )),
+                BidirType::Custom { request, response } => {
+                    let req_ty: syn::Type = syn::parse_str(request)
+                        .unwrap_or_else(|_| syn::parse_str("serde_json::Value").unwrap());
+                    let resp_ty: syn::Type = syn::parse_str(response)
+                        .unwrap_or_else(|_| syn::parse_str("serde_json::Value").unwrap());
+                    Some((
+                        quote! { #idx_lit },
+                        quote! {
+                            schema = schema
+                                .with_bidirectional(true)
+                                .with_request_type(schemars::schema_for!(#req_ty).into())
+                                .with_response_type(schemars::schema_for!(#resp_ty).into());
+                        },
+                    ))
+                }
+            }
+        })
+        .unzip();
 
     quote! {
         /// Auto-generated method enum for schema extraction
@@ -217,6 +261,20 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                             schema = schema.with_returns(r);
                         }
                         schema = schema.with_streaming(*is_streaming);
+
+                        // Apply bidirectional schema configuration.
+                        // Uses a compile-time match on the method index so that type-level
+                        // calls like schemars::schema_for!(MyType) work correctly.
+                        // Each arm is generated at macro-expansion time.
+                        match i {
+                            #(
+                                #bidir_index => {
+                                    #bidir_schema_calls
+                                }
+                            )*
+                            _ => {}
+                        }
+
                         schema
                     })
                     .collect::<Vec<_>>();
