@@ -1,7 +1,7 @@
 //! Tests for HandleEnum derive macro
 
 use plexus_core::Handle;
-use hub_macro::HandleEnum;
+use plexus_macros::HandleEnum;
 use uuid::Uuid;
 
 // Test plugin ID
