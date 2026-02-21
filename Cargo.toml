@@ -16,7 +16,7 @@ uuid = { version = "1.0", features = ["v5"] }
 
 [dev-dependencies]
 plexus-macros = { path = "." }
-substrate = { path = "../plexus-substrate" }
+plexus-substrate = { path = "../plexus-substrate" }
 plexus-core = { path = "../plexus-core" }
 dialectic = { version = "0.4.1", features = ["tokio"] }
 schemars = { version = "1.0.4", features = ["derive", "uuid1"] }
