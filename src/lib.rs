@@ -79,25 +79,22 @@ impl Parse for HubMethodAttrs {
     }
 }
 
-/// Attribute macro for hub methods within an impl block.
-///
-/// This is used inside a `#[hub_methods]` impl block to mark individual methods.
-/// When used standalone, it generates a schema function.
+/// Attribute macro for individual methods within a `#[plexus::activation]` impl block.
 ///
 /// # Example
 ///
 /// ```ignore
-/// #[hub_methods(namespace = "bash")]
+/// #[plexus::activation(namespace = "bash")]
 /// impl Bash {
 ///     /// Execute a bash command
-///     #[hub_method]
+///     #[plexus::method]
 ///     async fn execute(&self, command: String) -> impl Stream<Item = BashEvent> {
 ///         // ...
 ///     }
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn hub_method(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn method(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as HubMethodAttrs);
     let input_fn = parse_macro_input!(item as ItemFn);
 
@@ -105,6 +102,13 @@ pub fn hub_method(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(tokens) => tokens.into(),
         Err(e) => e.to_compile_error().into(),
     }
+}
+
+/// Deprecated: use `plexus::method` instead.
+#[deprecated(since = "0.5.0", note = "Use `plexus::method` instead")]
+#[proc_macro_attribute]
+pub fn hub_method(attr: TokenStream, item: TokenStream) -> TokenStream {
+    method(attr, item)
 }
 
 fn hub_method_impl(args: HubMethodAttrs, input_fn: ItemFn) -> syn::Result<TokenStream2> {
@@ -230,7 +234,7 @@ fn generate_schema_fn(
     }
 }
 
-/// Attribute macro for impl blocks containing hub methods.
+/// Attribute macro for impl blocks defining a Plexus activation.
 ///
 /// Generates:
 /// - Method enum for schema extraction
@@ -247,17 +251,17 @@ fn generate_schema_fn(
 /// # Example
 ///
 /// ```ignore
-/// #[hub_methods(namespace = "bash", version = "1.0.0", description = "Execute bash commands")]
+/// #[plexus::activation(namespace = "bash", version = "1.0.0", description = "Execute bash commands")]
 /// impl Bash {
 ///     /// Execute a bash command and stream output
-///     #[hub_method]
+///     #[plexus::method]
 ///     async fn execute(&self, command: String) -> impl Stream<Item = BashEvent> + Send + 'static {
 ///         self.executor.execute(&command).await
 ///     }
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn hub_methods(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn activation(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as HubMethodsAttrs);
     let input_impl = parse_macro_input!(item as ItemImpl);
 
@@ -265,6 +269,13 @@ pub fn hub_methods(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(tokens) => tokens.into(),
         Err(e) => e.to_compile_error().into(),
     }
+}
+
+/// Deprecated: use `plexus::activation` instead.
+#[deprecated(since = "0.5.0", note = "Use `plexus::activation` instead")]
+#[proc_macro_attribute]
+pub fn hub_methods(attr: TokenStream, item: TokenStream) -> TokenStream {
+    activation(attr, item)
 }
 
 /// **DEPRECATED**: This derive macro is no longer needed.
