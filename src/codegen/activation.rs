@@ -28,6 +28,7 @@ pub fn generate(
 
     let dispatch_arms = generate_dispatch_arms(methods, namespace, crate_path);
     let help_arms = generate_help_arms(methods);
+    let has_public_rpc_methods = methods.iter().any(|m| !m.requires_auth);
     let rpc_trait_methods = generate_rpc_trait_methods(methods);
     let rpc_impl_methods = generate_rpc_impl_methods(struct_name, methods, namespace, crate_path);
 
@@ -177,6 +178,31 @@ pub fn generate(
         quote! { fn namespace(&self) -> &str { #namespace } }
     };
 
+    // Generate jsonrpsee RPC trait + impl only if there are non-auth methods.
+    // Auth-requiring methods are dispatched through Activation::call() which
+    // handles auth injection. The jsonrpsee RPC trait cannot carry auth context.
+    let into_rpc_body = if has_public_rpc_methods {
+        quote! { self.into_rpc().into() }
+    } else {
+        quote! { jsonrpsee::core::server::Methods::new() }
+    };
+
+    let rpc_block = if has_public_rpc_methods {
+        quote! {
+            #[jsonrpsee::proc_macros::rpc(server, namespace = #namespace)]
+            pub trait #rpc_trait_name {
+                #(#rpc_trait_methods)*
+            }
+
+            #[async_trait::async_trait]
+            impl #impl_generics #rpc_server_name for #self_ty #where_clause {
+                #(#rpc_impl_methods)*
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     quote! {
         impl #struct_name {
             pub const NAMESPACE: &'static str = #namespace;
@@ -189,17 +215,7 @@ pub fn generate(
             }
         }
 
-        // Generate the RPC trait for jsonrpsee
-        #[jsonrpsee::proc_macros::rpc(server, namespace = #namespace)]
-        pub trait #rpc_trait_name {
-            #(#rpc_trait_methods)*
-        }
-
-        // Implement the RPC server trait
-        #[async_trait::async_trait]
-        impl #impl_generics #rpc_server_name for #self_ty #where_clause {
-            #(#rpc_impl_methods)*
-        }
+        #rpc_block
 
         #[async_trait::async_trait]
         impl #impl_generics #crate_path::plexus::Activation for #self_ty #where_clause {
@@ -283,7 +299,7 @@ pub fn generate(
             }
 
             fn into_rpc_methods(self) -> jsonrpsee::core::server::Methods {
-                self.into_rpc().into()
+                #into_rpc_body
             }
 
             fn plugin_schema(&self) -> #crate_path::plexus::PluginSchema {
@@ -298,6 +314,10 @@ pub fn generate(
 fn generate_rpc_trait_methods(methods: &[MethodInfo]) -> Vec<TokenStream> {
     methods
         .iter()
+        // Auth-requiring methods are dispatched through Activation::call() which
+        // handles auth injection. The jsonrpsee RPC trait doesn't carry auth context,
+        // so we skip generating direct RPC endpoints for these methods.
+        .filter(|m| !m.requires_auth)
         .map(|m| {
             let method_name = &m.fn_name;
             let method_name_str = &m.method_name;
@@ -333,6 +353,8 @@ fn generate_rpc_impl_methods(
 
     methods
         .iter()
+        // Skip auth-requiring methods — they route through Activation::call()
+        .filter(|m| !m.requires_auth)
         .map(|m| {
             let method_name = &m.fn_name;
             let method_name_str = &m.method_name;
@@ -466,9 +488,25 @@ fn generate_dispatch_arms(
                 quote! {}
             };
 
+            // Generate #[from_auth(resolver)] calls
+            // Each resolver is called with &auth_ctx and produces a named binding via ?
+            let resolver_bindings: Vec<proc_macro2::TokenStream> = m.auth_resolvers.iter().map(|r| {
+                let name = &r.param_name;
+                let expr = &r.resolver_expr;
+                quote! {
+                    let #name = #expr(&auth_ctx).await
+                        .map_err(|e| #crate_path::plexus::PlexusError::ExecutionError(e.to_string()))?;
+                }
+            }).collect();
+
             // Build parameter list for method call
-            let method_params = if m.requires_auth {
+            let resolver_names: Vec<&syn::Ident> = m.auth_resolvers.iter().map(|r| &r.param_name).collect();
+            let method_params = if m.requires_auth && m.auth_resolvers.is_empty() {
+                // Raw auth context pass-through (legacy)
                 quote! { auth_ctx, #(#param_names),* }
+            } else if !m.auth_resolvers.is_empty() {
+                // Resolved parameters + regular params
+                quote! { #(#resolver_names,)* #(#param_names),* }
             } else {
                 quote! { #(#param_names),* }
             };
@@ -480,6 +518,7 @@ fn generate_dispatch_arms(
                     quote! {
                         #method_name => {
                             #auth_injection
+                            #(#resolver_bindings)*
                             #param_extraction
                             let stream = self.#fn_name(#method_params).await;
                             Ok(#crate_path::plexus::wrap_stream(
@@ -502,6 +541,7 @@ fn generate_dispatch_arms(
                     quote! {
                         #method_name => {
                             #auth_injection
+                            #(#resolver_bindings)*
                             #param_extraction
                             // Create bidir channel and wrap stream together
                             let (ctx, wrap_fn) = #crate_path::plexus::create_bidir_stream::<
@@ -536,6 +576,7 @@ fn generate_dispatch_arms(
                     quote! {
                         #method_name => {
                             #auth_injection
+                            #(#resolver_bindings)*
                             #param_extraction
                             // Create bidir channel and wrap stream together
                             let (ctx, wrap_fn) = #crate_path::plexus::create_bidir_stream::<

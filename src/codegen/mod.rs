@@ -6,7 +6,7 @@ mod method_enum;
 use crate::parse::{HubMethodAttrs, HubMethodsAttrs, MethodInfo};
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{ImplItem, ItemImpl, Meta, Type};
+use syn::{FnArg, ImplItem, ItemImpl, Meta, Pat, Type};
 
 /// Generate all code from a #[hub_methods] impl block
 pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Result<TokenStream> {
@@ -50,6 +50,14 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                     Meta::NameValue(_) => None,
                 };
                 methods.push(MethodInfo::from_fn(method, hub_method_attrs.as_ref())?);
+
+                // Strip #[from_auth(...)] attributes from parameters so Rust
+                // doesn't complain about unknown attributes in the emitted code.
+                for arg in &mut method.sig.inputs {
+                    if let FnArg::Typed(pat_type) = arg {
+                        pat_type.attrs.retain(|attr| !attr.path().is_ident("from_auth"));
+                    }
+                }
             }
         }
     }

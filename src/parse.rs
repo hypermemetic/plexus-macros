@@ -8,6 +8,16 @@ use syn::{
     PathArguments, ReturnType, Token, Type,
 };
 
+/// A parameter resolved from the auth context via an arbitrary expression.
+/// Created by `#[from_auth(self.db.validate_user)]` on a method parameter.
+#[derive(Debug, Clone)]
+pub struct AuthResolver {
+    /// The parameter name in the method signature
+    pub param_name: syn::Ident,
+    /// The resolver expression (e.g. `self.db.validate_user`)
+    pub resolver_expr: syn::Expr,
+}
+
 /// Bidirectional channel type configuration
 #[derive(Debug, Clone)]
 pub enum BidirType {
@@ -294,6 +304,8 @@ pub struct MethodInfo {
     pub http_method: Option<String>,
     /// True if method requires auth context (detected from `auth: &AuthContext` parameter)
     pub requires_auth: bool,
+    /// Parameters resolved from auth context via `#[from_auth(resolver)]`
+    pub auth_resolvers: Vec<AuthResolver>,
 }
 
 impl MethodInfo {
@@ -338,6 +350,7 @@ impl MethodInfo {
 
         // Track if method requires auth
         let mut requires_auth = false;
+        let mut auth_resolvers: Vec<AuthResolver> = Vec::new();
 
         // Extract parameters after &self
         let mut params = Vec::new();
@@ -346,6 +359,18 @@ impl MethodInfo {
                 if let Pat::Ident(ident) = &*pat_type.pat {
                     let name = ident.ident.clone();
                     let name_str = name.to_string();
+
+                    // Check for #[from_auth(resolver_expr)] attribute
+                    // e.g. #[from_auth(self.db.validate_user)] user: ValidUser
+                    if let Some(resolver) = extract_from_auth_attr(&pat_type.attrs) {
+                        requires_auth = true;
+                        auth_resolvers.push(AuthResolver {
+                            param_name: name,
+                            resolver_expr: resolver,
+                        });
+                        // Don't include in RPC params
+                        continue;
+                    }
 
                     // Check if this is an auth context parameter
                     // Detect auth: &AuthContext
@@ -419,8 +444,27 @@ impl MethodInfo {
             bidirectional,
             http_method,
             requires_auth,
+            auth_resolvers,
         })
     }
+}
+
+/// Extract the resolver expression from a `#[from_auth(expr)]` attribute.
+/// Returns `Some(expr)` if the attribute is found, `None` otherwise.
+///
+/// Supports:
+/// - `#[from_auth(self.db.validate_user)]`
+/// - `#[from_auth(self.require_admin)]`
+/// - Any arbitrary expression that will be called with `&AuthContext`
+fn extract_from_auth_attr(attrs: &[syn::Attribute]) -> Option<syn::Expr> {
+    for attr in attrs {
+        if attr.path().is_ident("from_auth") {
+            // Parse the inner expression from #[from_auth(expr)]
+            let expr: syn::Expr = attr.parse_args().ok()?;
+            return Some(expr);
+        }
+    }
+    None
 }
 
 /// Check if a type is &AuthContext or Option<&AuthContext>
