@@ -27,16 +27,17 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     let self_ty = &input_impl.self_ty;
     let (impl_generics, _, where_clause) = input_impl.generics.split_for_impl();
 
-    // Extract all #[hub_method] functions
+    // Extract all #[method] / #[hub_method] functions
     let mut methods: Vec<MethodInfo> = Vec::new();
 
     for item in &mut input_impl.items {
         if let ImplItem::Fn(method) = item {
-            // Check for hub_method attribute (handles both #[hub_method] and #[hub_macro::hub_method])
+            // Accept both the canonical #[method] / #[plexus_macros::method] and
+            // the deprecated #[hub_method] / #[plexus_macros::hub_method] spellings.
             let hub_method_idx = method.attrs.iter().position(|attr| {
                 let path = attr.path();
-                path.is_ident("hub_method")
-                    || path.segments.last().map(|s| s.ident == "hub_method").unwrap_or(false)
+                let last = path.segments.last().map(|s| s.ident.to_string());
+                matches!(last.as_deref(), Some("method") | Some("hub_method"))
             });
 
             if let Some(idx) = hub_method_idx {
@@ -65,7 +66,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     if methods.is_empty() {
         return Err(syn::Error::new_spanned(
             &input_impl,
-            "No #[hub_method] functions found",
+            "No #[plexus::method] functions found",
         ));
     }
 
