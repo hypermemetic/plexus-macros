@@ -26,7 +26,9 @@
 mod codegen;
 mod handle_enum;
 mod parse;
+mod request;
 mod stream_event;
+
 
 use codegen::generate_all;
 use parse::HubMethodsAttrs;
@@ -352,4 +354,62 @@ pub fn stream_event_derive(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(HandleEnum, attributes(handle))]
 pub fn handle_enum_derive(input: TokenStream) -> TokenStream {
     handle_enum::derive(input)
+}
+
+/// Derive macro for typed HTTP/WebSocket request extraction.
+///
+/// Generates `impl PlexusRequest` (extraction) and `impl schemars::JsonSchema`
+/// (with `x-plexus-source` extensions) for the annotated struct.
+///
+/// # Field annotations
+///
+/// - `#[from_cookie("name")]` — extract from named cookie
+/// - `#[from_header("name")]` — extract from named HTTP header
+/// - `#[from_query("name")]` — extract from named URI query parameter
+/// - `#[from_peer]` — copy `ctx.peer` (peer socket address)
+/// - `#[from_auth_context]` — copy `ctx.auth` (auth context)
+/// - (no annotation) — `Default::default()`
+///
+/// # Example
+///
+/// ```ignore
+/// use plexus_macros::PlexusRequest;
+///
+/// #[derive(PlexusRequest)]
+/// struct MyRequest {
+///     #[from_cookie("access_token")]
+///     auth_token: String,
+///
+///     #[from_header("origin")]
+///     origin: Option<String>,
+///
+///     #[from_peer]
+///     peer_addr: Option<std::net::SocketAddr>,
+/// }
+/// ```
+#[proc_macro_derive(
+    PlexusRequest,
+    attributes(from_cookie, from_header, from_query, from_peer, from_auth_context)
+)]
+pub fn plexus_request_derive(input: TokenStream) -> TokenStream {
+    request::derive(input)
+}
+
+/// No-op `JsonSchema` derive — used when plexus-macros is aliased as `schemars`
+/// in dev-dependencies to prevent duplicate `impl JsonSchema` conflicts with
+/// `#[derive(PlexusRequest)]` (which generates its own `impl JsonSchema`).
+///
+/// When plexus-macros is aliased as schemars in dev-deps:
+/// ```toml
+/// [dev-dependencies]
+/// schemars = { path = "../plexus-macros", package = "plexus-macros", features = ["schemars-compat"] }
+/// ```
+/// then `#[derive(schemars::JsonSchema)]` invokes THIS derive instead of the real schemars derive,
+/// producing no output, so only `PlexusRequest`'s `impl JsonSchema` exists.
+#[cfg(feature = "schemars-compat")]
+#[proc_macro_derive(JsonSchema, attributes(schemars, serde))]
+pub fn json_schema_noop_derive(_input: TokenStream) -> TokenStream {
+    // Intentionally produces no output.
+    // PlexusRequest already generates impl JsonSchema with x-plexus-source extensions.
+    TokenStream::new()
 }
