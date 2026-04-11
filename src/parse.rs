@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use syn::{
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
-    Expr, ExprLit, FnArg, GenericArgument, ImplItemFn, Lit, Meta, MetaList, MetaNameValue, Pat,
-    PathArguments, ReturnType, Token, Type,
+    Expr, ExprLit, ExprPath, ExprTuple, FnArg, GenericArgument, ImplItemFn, Lit, Meta, MetaList,
+    MetaNameValue, Pat, PathArguments, ReturnType, Token, Type,
 };
 
 /// A parameter resolved from the auth context via an arbitrary expression.
@@ -29,6 +29,23 @@ pub enum BidirType {
     Custom { request: String, response: String },
 }
 
+/// Per-method override for the activation-level request type.
+///
+/// Used in `#[plexus::method(request = ())]` to exempt individual methods from
+/// the activation-level request extraction. When set to `Skip`, the dispatch
+/// wrapper omits the `<ReqType>::extract(raw_ctx)?` call for that method, even
+/// if the activation declares `request = MyType`.
+///
+/// `Type` variant is reserved for future use (per-method request type override).
+#[derive(Debug, Clone)]
+pub enum MethodRequestOverride {
+    /// `request = ()` — skip extraction for this method entirely.
+    Skip,
+    /// `request = SomeType` — use a different request type for this method (future).
+    #[allow(dead_code)]
+    Type(syn::Type),
+}
+
 /// Parsed attributes for #[hub_method]
 pub struct HubMethodAttrs {
     pub name: Option<String>,
@@ -47,6 +64,10 @@ pub struct HubMethodAttrs {
     /// HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)
     /// Stored as string during parsing, converted to enum in code generation
     pub http_method: Option<String>,
+    /// Per-method request override. `Some(Skip)` means `request = ()` — this method
+    /// bypasses the activation-level request extraction even if the activation has
+    /// `request = MyType`. `None` means inherit the activation-level behavior.
+    pub request_override: Option<MethodRequestOverride>,
 }
 
 impl Parse for HubMethodAttrs {
@@ -57,6 +78,7 @@ impl Parse for HubMethodAttrs {
         let mut streaming = false;
         let mut bidirectional = BidirType::None;
         let mut http_method = None;
+        let mut request_override: Option<MethodRequestOverride> = None;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -103,6 +125,25 @@ impl Parse for HubMethodAttrs {
                                             ),
                                         ));
                                     }
+                                }
+                            }
+                        } else if path.is_ident("request") {
+                            // request = ()  → skip activation-level request extraction
+                            // request = SomeType → use a different request type (future)
+                            match value {
+                                Expr::Tuple(ExprTuple { ref elems, .. }) if elems.is_empty() => {
+                                    request_override = Some(MethodRequestOverride::Skip);
+                                }
+                                Expr::Path(ExprPath { ref path, .. }) => {
+                                    // Convert the path expression to a Type
+                                    let ty: Type = Type::Path(syn::TypePath {
+                                        qself: None,
+                                        path: path.clone(),
+                                    });
+                                    request_override = Some(MethodRequestOverride::Type(ty));
+                                }
+                                _ => {
+                                    // Unknown form — ignore for forward compatibility
                                 }
                             }
                         }
@@ -165,7 +206,7 @@ impl Parse for HubMethodAttrs {
             }
         }
 
-        Ok(HubMethodAttrs { name, param_docs, returns_variants, streaming, bidirectional, http_method })
+        Ok(HubMethodAttrs { name, param_docs, returns_variants, streaming, bidirectional, http_method, request_override })
     }
 }
 
@@ -192,6 +233,15 @@ pub struct HubMethodsAttrs {
     /// If set, namespace() will call this method instead of returning the constant
     /// e.g., namespace_fn = "runtime_namespace" generates: fn namespace(&self) -> &str { self.runtime_namespace() }
     pub namespace_fn: Option<String>,
+    /// Activation-level request type (from `request = MyRequest`).
+    /// When set, the dispatch code extracts this type from the raw HTTP context
+    /// and injects fields into methods that declare `#[activation_param]`.
+    pub request_type: Option<syn::Type>,
+    /// Child activation field names (from `children = [field_a, field_b]`).
+    /// When set, the generated `ChildRouter::get_child()` dispatches by field name,
+    /// enabling type-safe `parent.child.method` hierarchical routing.
+    /// Each ident must match both a struct field name and the child's namespace.
+    pub children: Vec<syn::Ident>,
 }
 
 impl Parse for HubMethodsAttrs {
@@ -205,6 +255,8 @@ impl Parse for HubMethodsAttrs {
         let mut hub = false;
         let mut plugin_id = None;
         let mut namespace_fn = None;
+        let mut request_type: Option<syn::Type> = None;
+        let mut children: Vec<syn::Ident> = Vec::new();
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -212,6 +264,18 @@ impl Parse for HubMethodsAttrs {
             for meta in metas {
                 match meta {
                     Meta::NameValue(MetaNameValue { path, value, .. }) => {
+                        // Handle `request = SomeType` — value is a path/type expression,
+                        // not a string literal. We parse the Expr and convert to a Type.
+                        if path.is_ident("request") {
+                            // The value after `=` is an expression (e.g. Expr::Path for `TestRequest`).
+                            // Expr::Path can be directly reinterpreted as a Type::Path.
+                            let ty: syn::Type = expr_to_type(&value).ok_or_else(|| {
+                                syn::Error::new_spanned(&path, "request = <Type>: expected a type path (e.g. request = MyRequest or request = ())")
+                            })?;
+                            request_type = Some(ty);
+                            continue;
+                        }
+
                         if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
                             if path.is_ident("namespace") {
                                 namespace = s.value();
@@ -259,7 +323,14 @@ impl Parse for HubMethodsAttrs {
                             hub = true;
                         }
                     }
-                    _ => {}
+                    Meta::List(list) => {
+                        // children = [field_a, field_b, ...]
+                        if list.path.is_ident("children") {
+                            let parser = Punctuated::<syn::Ident, Token![,]>::parse_terminated;
+                            let idents = syn::parse::Parser::parse2(parser, list.tokens.clone())?;
+                            children = idents.into_iter().collect();
+                        }
+                    }
                 }
             }
         }
@@ -271,7 +342,7 @@ impl Parse for HubMethodsAttrs {
             ));
         }
 
-        Ok(HubMethodsAttrs { namespace, version, description, long_description, crate_path, resolve_handle, hub, plugin_id, namespace_fn })
+        Ok(HubMethodsAttrs { namespace, version, description, long_description, crate_path, resolve_handle, hub, plugin_id, namespace_fn, request_type, children })
     }
 }
 
@@ -280,6 +351,16 @@ pub struct ParamInfo {
     pub name: syn::Ident,
     pub ty: Type,
     pub description: Option<String>,
+}
+
+/// A parameter injected from the activation's extracted request struct.
+/// Created by `#[activation_param]` on a method parameter.
+#[derive(Debug, Clone)]
+pub struct ActivationParamInfo {
+    /// The parameter name in the method signature (must match a field in the request struct)
+    pub param_name: syn::Ident,
+    /// The declared type in the method (Rust enforces this matches the request struct field type)
+    pub ty: Type,
 }
 
 /// Information extracted from a #[hub_method] function
@@ -306,6 +387,12 @@ pub struct MethodInfo {
     pub requires_auth: bool,
     /// Parameters resolved from auth context via `#[from_auth(resolver)]`
     pub auth_resolvers: Vec<AuthResolver>,
+    /// Parameters injected from the activation's request struct via `#[activation_param]`
+    /// These are stripped from RPC schema and injected at dispatch time from `req.field_name`
+    pub activation_params: Vec<ActivationParamInfo>,
+    /// Per-method request override. `Some(Skip)` means `request = ()` was set on this method,
+    /// which causes the dispatch wrapper to skip activation-level request extraction.
+    pub request_override: Option<MethodRequestOverride>,
 }
 
 impl MethodInfo {
@@ -342,6 +429,8 @@ impl MethodInfo {
             .unwrap_or(false);
         let http_method = hub_method_attrs
             .and_then(|a| a.http_method.clone());
+        let request_override = hub_method_attrs
+            .and_then(|a| a.request_override.clone());
 
         // Get bidirectional from attribute (may be overridden by parameter type inference)
         let mut bidirectional = hub_method_attrs
@@ -351,6 +440,7 @@ impl MethodInfo {
         // Track if method requires auth
         let mut requires_auth = false;
         let mut auth_resolvers: Vec<AuthResolver> = Vec::new();
+        let mut activation_params: Vec<ActivationParamInfo> = Vec::new();
 
         // Extract parameters after &self
         let mut params = Vec::new();
@@ -359,6 +449,20 @@ impl MethodInfo {
                 if let Pat::Ident(ident) = &*pat_type.pat {
                     let name = ident.ident.clone();
                     let name_str = name.to_string();
+
+                    // Check for #[activation_param] attribute first
+                    // e.g. #[activation_param] auth_token: String
+                    if let Some(err) = check_activation_param_attr(&pat_type.attrs)? {
+                        return Err(err);
+                    }
+                    if has_activation_param_attr(&pat_type.attrs) {
+                        activation_params.push(ActivationParamInfo {
+                            param_name: name,
+                            ty: (*pat_type.ty).clone(),
+                        });
+                        // Don't include in RPC params or schema
+                        continue;
+                    }
 
                     // Check for #[from_auth(resolver_expr)] attribute
                     // e.g. #[from_auth(self.db.validate_user)] user: ValidUser
@@ -445,8 +549,61 @@ impl MethodInfo {
             http_method,
             requires_auth,
             auth_resolvers,
+            activation_params,
+            request_override,
         })
     }
+}
+
+/// Convert a `syn::Expr` to a `syn::Type` for `request = Type` parsing.
+///
+/// Handles:
+/// - `Expr::Path` (e.g. `TestRequest`, `my_mod::MyRequest`) → `Type::Path`
+/// - `Expr::Tuple` with 0 elements (e.g. `()`) → `Type::Tuple` (unit type)
+fn expr_to_type(expr: &Expr) -> Option<syn::Type> {
+    match expr {
+        Expr::Path(ExprPath { attrs: _, qself, path }) => {
+            Some(syn::Type::Path(syn::TypePath {
+                qself: qself.as_ref().map(|qs| syn::QSelf {
+                    lt_token: qs.lt_token,
+                    ty: qs.ty.clone(),
+                    position: qs.position,
+                    as_token: qs.as_token,
+                    gt_token: qs.gt_token,
+                }),
+                path: path.clone(),
+            }))
+        }
+        Expr::Tuple(ExprTuple { elems, .. }) if elems.is_empty() => {
+            // `()` — unit type used for `request = ()` override
+            Some(syn::parse_quote! { () })
+        }
+        _ => None,
+    }
+}
+
+/// Check if a parameter has the `#[activation_param]` attribute.
+/// Returns `true` if the bare `#[activation_param]` attribute is present.
+fn has_activation_param_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| attr.path().is_ident("activation_param"))
+}
+
+/// Validate that `#[activation_param]` takes no arguments.
+/// Returns `Some(Err(...))` if the attribute is present but has arguments,
+/// `None` if the attribute is absent or is correctly bare.
+fn check_activation_param_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<syn::Error>> {
+    for attr in attrs {
+        if attr.path().is_ident("activation_param") {
+            // Make sure it's a bare path attribute, not #[activation_param(...)]
+            if let syn::Meta::List(list) = &attr.meta {
+                return Ok(Some(syn::Error::new_spanned(
+                    list,
+                    "activation_param takes no arguments — extraction is defined on the request struct, not the method",
+                )));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Extract the resolver expression from a `#[from_auth(expr)]` attribute.

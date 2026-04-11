@@ -44,11 +44,11 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                             // that handle both missing fields AND explicit null values
                             let is_option = is_option_type(ty);
                             if is_option {
-                                // Always use crate::serde_helpers since consuming crates should
-                                // re-export plexus_core::serde_helpers (or define their own)
+                                let serde_helpers_path = format!("{}::serde_helpers::deserialize_null_as_none",
+                                    crate_path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::"));
                                 quote! {
                                     #[schemars(description = #desc)]
-                                    #[serde(default, deserialize_with = "crate::serde_helpers::deserialize_null_as_none")]
+                                    #[serde(default, deserialize_with = #serde_helpers_path)]
                                     #name: #ty
                                 }
                             } else {
