@@ -425,6 +425,12 @@ pub fn stream_event_derive(input: TokenStream) -> TokenStream {
 /// - `plugin_id = "CONSTANT_NAME"` - Name of the constant holding the plugin UUID
 /// - `version = "1.0.0"` - Semantic version for handles
 /// - `crate_path = "..."` (optional, default: "plexus_core") - Path to plexus_core crate
+/// - `plugin_id_type = "Type<Args>"` (optional) - Concrete type whose associated
+///   constant `plugin_id` names. Use this when the owning activation is generic
+///   (e.g. `Cone<P: HubContext = NoParent>`) to pin the instantiation and avoid
+///   E0283 "cannot infer type" errors. Pairs with `plugin_id` — e.g.
+///   `plugin_id = "Cone::PLUGIN_ID", plugin_id_type = "Cone<NoParent>"` emits
+///   `<Cone<NoParent>>::PLUGIN_ID`.
 ///
 /// Variant-level:
 /// - `method = "..."` (required) - The handle.method value

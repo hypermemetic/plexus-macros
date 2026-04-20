@@ -164,3 +164,64 @@ fn test_roundtrip() {
         panic!("Expected Message variant");
     }
 }
+
+// ============================================================================
+// Generic-activation fixture (IR-21)
+//
+// Regression: `#[derive(HandleEnum)]` on an enum that references the
+// associated constant of a GENERIC activation (e.g. `GenericActivation<P>`)
+// used to fail with E0283 because `P` could not be inferred. The
+// `plugin_id_type` attribute lets authors pin the concrete instantiation so
+// codegen emits a fully-qualified `<GenericActivation<NoParent>>::PLUGIN_ID`.
+// ============================================================================
+
+mod generic_activation_fixture {
+    use super::*;
+    use plexus_core::plexus::{HubContext, NoParent};
+    use std::marker::PhantomData;
+
+    const GENERIC_TEST_PLUGIN_ID: Uuid =
+        Uuid::from_u128(0xabcdef01_2345_6789_abcd_ef0123456789);
+
+    /// Generic activation mirroring the shape of `Cone<P>` / `ClaudeCode<P>`.
+    #[allow(dead_code)]
+    pub struct GenericActivation<P: HubContext = NoParent> {
+        _marker: PhantomData<P>,
+    }
+
+    impl<P: HubContext> GenericActivation<P> {
+        pub const PLUGIN_ID: Uuid = GENERIC_TEST_PLUGIN_ID;
+    }
+
+    /// Without `plugin_id_type`, referencing `GenericActivation::PLUGIN_ID`
+    /// would trigger E0283. `plugin_id_type = "GenericActivation<NoParent>"`
+    /// pins the instantiation.
+    #[derive(Debug, Clone, HandleEnum)]
+    #[handle(
+        plugin_id = "GenericActivation::PLUGIN_ID",
+        plugin_id_type = "GenericActivation<NoParent>",
+        version = "1.0.0"
+    )]
+    pub enum GenericHandle {
+        #[handle(method = "greet")]
+        Greet { name: String },
+    }
+
+    #[test]
+    fn test_generic_to_handle() {
+        let h = GenericHandle::Greet { name: "world".to_string() }.to_handle();
+        assert_eq!(h.plugin_id, GENERIC_TEST_PLUGIN_ID);
+        assert_eq!(h.method, "greet");
+        assert_eq!(h.meta, vec!["world"]);
+    }
+
+    #[test]
+    fn test_generic_try_from() {
+        let h = Handle::new(GENERIC_TEST_PLUGIN_ID, "1.0.0", "greet")
+            .with_meta(vec!["world".to_string()]);
+        let parsed = GenericHandle::try_from(&h).unwrap();
+        match parsed {
+            GenericHandle::Greet { name } => assert_eq!(name, "world"),
+        }
+    }
+}

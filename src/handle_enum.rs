@@ -43,6 +43,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
 struct HandleEnumAttrs {
     /// The constant name holding the plugin UUID (e.g., "CLAUDECODE_PLUGIN_ID")
     plugin_id: String,
+    /// Optional concrete type whose associated constant `plugin_id` names, used
+    /// when the owning activation is generic (e.g., `Cone<P: HubContext = NoParent>`).
+    /// When set, codegen emits `<plugin_id_type>::<plugin_id_tail>` instead of
+    /// `plugin_id` directly, avoiding E0283 "cannot infer type" errors.
+    ///
+    /// Example: `plugin_id_type = "Cone<NoParent>"` paired with
+    /// `plugin_id = "Cone::PLUGIN_ID"` emits `<Cone<NoParent>>::PLUGIN_ID`.
+    plugin_id_type: Option<String>,
     /// Semantic version for handles (e.g., "1.0.0")
     version: String,
     /// Base crate path for imports (default: "plexus_core")
@@ -52,6 +60,7 @@ struct HandleEnumAttrs {
 impl Parse for HandleEnumAttrs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut plugin_id = None;
+        let mut plugin_id_type = None;
         let mut version = None;
         let mut crate_path = "plexus_core".to_string();
 
@@ -65,6 +74,8 @@ impl Parse for HandleEnumAttrs {
                     {
                         if path.is_ident("plugin_id") {
                             plugin_id = Some(s.value());
+                        } else if path.is_ident("plugin_id_type") {
+                            plugin_id_type = Some(s.value());
                         } else if path.is_ident("version") {
                             version = Some(s.value());
                         } else if path.is_ident("crate_path") {
@@ -79,6 +90,7 @@ impl Parse for HandleEnumAttrs {
             plugin_id: plugin_id.ok_or_else(|| {
                 syn::Error::new(input.span(), "HandleEnum requires plugin_id = \"...\" attribute")
             })?,
+            plugin_id_type,
             version: version.ok_or_else(|| {
                 syn::Error::new(input.span(), "HandleEnum requires version = \"...\" attribute")
             })?,
@@ -178,13 +190,63 @@ fn derive_impl(input: DeriveInput) -> syn::Result<TokenStream2> {
     let enum_attrs = extract_enum_attrs(&input)?;
     let crate_path: syn::Path = syn::parse_str(&enum_attrs.crate_path)?;
 
-    // Parse the plugin_id as an identifier (constant name)
-    let plugin_id_ident: syn::Path = syn::parse_str(&enum_attrs.plugin_id).map_err(|e| {
-        syn::Error::new_spanned(
-            &input,
-            format!("Invalid plugin_id constant name '{}': {}", enum_attrs.plugin_id, e),
-        )
-    })?;
+    // Resolve the plugin_id expression used in codegen.
+    //
+    // When `plugin_id_type` is supplied, the author is pinning a concrete
+    // instantiation of a generic activation (e.g. `Cone<NoParent>`) so that the
+    // referenced associated constant is unambiguous at the derive-expansion
+    // site. In that case we emit `<TypePath>::TailIdent` — a fully-qualified
+    // path expression — rather than the bare path, which would otherwise
+    // trigger E0283 for `Cone<P: HubContext>` since `P` cannot be inferred.
+    //
+    // Without `plugin_id_type` we preserve the historical behaviour and emit
+    // the `plugin_id` string as a plain path. This keeps all existing
+    // non-generic call sites working unchanged.
+    let plugin_id_expr: TokenStream2 = match enum_attrs.plugin_id_type.as_deref() {
+        Some(type_str) => {
+            let qualified_type: syn::Type = syn::parse_str(type_str).map_err(|e| {
+                syn::Error::new_spanned(
+                    &input,
+                    format!("Invalid plugin_id_type '{}': {}", type_str, e),
+                )
+            })?;
+            // The `plugin_id` string is treated as `TypeName::TAIL` — we keep
+            // only the trailing segment and re-root it against the user-supplied
+            // type. This lets the existing `Cone::PLUGIN_ID` surface keep
+            // working when the author adds `plugin_id_type = "Cone<NoParent>"`.
+            let plugin_id_path: syn::Path =
+                syn::parse_str(&enum_attrs.plugin_id).map_err(|e| {
+                    syn::Error::new_spanned(
+                        &input,
+                        format!(
+                            "Invalid plugin_id path '{}': {}",
+                            enum_attrs.plugin_id, e
+                        ),
+                    )
+                })?;
+            let tail = plugin_id_path.segments.last().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &input,
+                    format!("plugin_id '{}' has no path segments", enum_attrs.plugin_id),
+                )
+            })?;
+            let tail_ident = &tail.ident;
+            quote! { <#qualified_type>::#tail_ident }
+        }
+        None => {
+            let plugin_id_path: syn::Path =
+                syn::parse_str(&enum_attrs.plugin_id).map_err(|e| {
+                    syn::Error::new_spanned(
+                        &input,
+                        format!(
+                            "Invalid plugin_id constant name '{}': {}",
+                            enum_attrs.plugin_id, e
+                        ),
+                    )
+                })?;
+            quote! { #plugin_id_path }
+        }
+    };
 
     let version = &enum_attrs.version;
 
@@ -199,7 +261,7 @@ fn derive_impl(input: DeriveInput) -> syn::Result<TokenStream2> {
     }
 
     // Generate to_handle() match arms
-    let to_handle_arms = generate_to_handle_arms(&variants, &plugin_id_ident, version);
+    let to_handle_arms = generate_to_handle_arms(&variants, &plugin_id_expr, version);
 
     // Generate TryFrom match arms
     let try_from_arms = generate_try_from_arms(&variants, &crate_path);
@@ -238,9 +300,9 @@ fn derive_impl(input: DeriveInput) -> syn::Result<TokenStream2> {
 
             fn try_from(handle: &#crate_path::Handle) -> Result<Self, Self::Error> {
                 // Verify plugin ownership
-                if handle.plugin_id != #plugin_id_ident {
+                if handle.plugin_id != #plugin_id_expr {
                     return Err(#crate_path::HandleParseError::WrongPlugin {
-                        expected: #plugin_id_ident,
+                        expected: #plugin_id_expr,
                         got: handle.plugin_id,
                     });
                 }
@@ -338,7 +400,7 @@ fn extract_variants(input: &DeriveInput) -> syn::Result<Vec<VariantInfo>> {
 
 fn generate_to_handle_arms(
     variants: &[VariantInfo],
-    plugin_id_ident: &syn::Path,
+    plugin_id_expr: &TokenStream2,
     version: &str,
 ) -> Vec<TokenStream2> {
     variants
@@ -351,7 +413,7 @@ fn generate_to_handle_arms(
                 // Unit-like variant with #[handle]
                 quote! {
                     Self::#variant_name => {
-                        plexus_core::Handle::new(#plugin_id_ident, #version, #method)
+                        plexus_core::Handle::new(#plugin_id_expr, #version, #method)
                     }
                 }
             } else {
@@ -368,7 +430,7 @@ fn generate_to_handle_arms(
 
                 quote! {
                     Self::#variant_name { #(#field_names),* } => {
-                        plexus_core::Handle::new(#plugin_id_ident, #version, #method)
+                        plexus_core::Handle::new(#plugin_id_expr, #version, #method)
                             .with_meta(vec![#(#field_clones),*])
                     }
                 }
