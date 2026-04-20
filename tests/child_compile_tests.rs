@@ -1,0 +1,25 @@
+//! CHILD-3 compile-fail and compile-pass tests for the
+//! `#[plexus_macros::child]` attribute.
+//!
+//! Positive fixtures must compile; negative fixtures must produce specific
+//! compile errors. Expected stderr files live next to each negative fixture
+//! and are generated / refreshed via `TRYBUILD=overwrite cargo test`.
+//!
+//! Run with: `cargo test --test child_compile_tests`.
+
+use trybuild::TestCases;
+
+#[test]
+fn child_compile_pass() {
+    let t = TestCases::new();
+    t.pass("tests/compile/child_static_and_dynamic_ok.rs");
+}
+
+#[test]
+fn child_compile_fail() {
+    let t = TestCases::new();
+    t.compile_fail("tests/compile/child_invalid_signature.rs");
+    t.compile_fail("tests/compile/child_and_method_mutually_exclusive.rs");
+    t.compile_fail("tests/compile/child_two_dynamic_methods.rs");
+    t.compile_fail("tests/compile/child_and_legacy_children_list.rs");
+}

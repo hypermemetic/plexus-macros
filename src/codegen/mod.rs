@@ -3,7 +3,10 @@
 mod activation;
 mod method_enum;
 
-use crate::parse::{extract_doc_description, HubMethodAttrs, HubMethodsAttrs, MethodInfo};
+use crate::parse::{
+    extract_doc_description, has_child_attr, has_method_attr, ChildMethodInfo, ChildMethodKind,
+    HubMethodAttrs, HubMethodsAttrs, MethodInfo,
+};
 use proc_macro2::{Span, TokenStream};
 use proc_macro_crate::{crate_name, FoundCrate};
 use quote::quote;
@@ -59,11 +62,37 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     let self_ty = &input_impl.self_ty;
     let (impl_generics, _, where_clause) = input_impl.generics.split_for_impl();
 
-    // Extract all #[method] / #[hub_method] functions
+    // Extract all #[method] / #[hub_method] functions and all #[child] functions.
     let mut methods: Vec<MethodInfo> = Vec::new();
+    let mut child_methods: Vec<ChildMethodInfo> = Vec::new();
 
     for item in &mut input_impl.items {
         if let ImplItem::Fn(method) = item {
+            // CHILD-3: a method annotated with both `#[child]` and `#[method]`
+            // is a user error — the two roles are mutually exclusive.
+            if has_child_attr(method) && has_method_attr(method) {
+                return Err(syn::Error::new_spanned(
+                    &method.sig,
+                    "#[plexus_macros::child] and #[plexus_macros::method] are mutually exclusive \
+                     on the same function: a function is either an RPC method or a child router \
+                     entry, not both",
+                ));
+            }
+
+            // CHILD-3: collect + validate `#[child]` methods. These are NOT
+            // exposed as RPC methods; they contribute only to ChildRouter
+            // routing. Strip the attribute after parsing so the emitted impl
+            // block doesn't still carry the (now-no-op) `#[child]` macro
+            // invocation.
+            if has_child_attr(method) {
+                child_methods.push(ChildMethodInfo::from_fn(method)?);
+                method.attrs.retain(|a| {
+                    let last = a.path().segments.last().map(|s| s.ident.to_string());
+                    !matches!(last.as_deref(), Some("child"))
+                });
+                continue;
+            }
+
             // Accept both the canonical #[method] / #[plexus_macros::method] and
             // the deprecated #[hub_method] / #[plexus_macros::hub_method] spellings.
             let hub_method_idx = method.attrs.iter().position(|attr| {
@@ -96,6 +125,39 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 }
             }
         }
+    }
+
+    // CHILD-3: at most one dynamic `#[child]` method per impl.
+    let dynamic_children: Vec<&ChildMethodInfo> = child_methods
+        .iter()
+        .filter(|c| matches!(c.kind, ChildMethodKind::Dynamic))
+        .collect();
+    if dynamic_children.len() > 1 {
+        let names: Vec<String> = dynamic_children
+            .iter()
+            .map(|c| c.fn_name.to_string())
+            .collect();
+        return Err(syn::Error::new_spanned(
+            &input_impl,
+            format!(
+                "at most one dynamic #[child] method is allowed per activation impl; \
+                 found {}: {}",
+                dynamic_children.len(),
+                names.join(", ")
+            ),
+        ));
+    }
+
+    // CHILD-3: reject mixing the legacy `children = [...]` attribute with
+    // the new `#[child]` method attribute on the same impl — the two
+    // systems don't merge, and silently picking one would hide intent.
+    if !child_methods.is_empty() && !args.children.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &input_impl,
+            "#[plexus_macros::child] methods cannot be combined with the legacy \
+             `children = [...]` activation attribute on the same impl; choose one. \
+             Remove `children = [...]` to migrate to the method-based syntax.",
+        ));
     }
 
     if methods.is_empty() {
@@ -135,6 +197,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         args.namespace_fn.as_deref(),
         args.request_type.as_ref(),
         &args.children,
+        &child_methods,
     );
 
     Ok(quote! {

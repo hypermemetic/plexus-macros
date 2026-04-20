@@ -124,6 +124,46 @@ pub fn hub_method(attr: TokenStream, item: TokenStream) -> TokenStream {
     method(attr, item)
 }
 
+/// Attribute macro for individual **child** methods within a
+/// `#[plexus_macros::activation]` impl block.
+///
+/// Two method shapes are accepted:
+///
+/// | Shape | Role | Example |
+/// |---|---|---|
+/// | `fn NAME(&self) -> Child` (no args) | Static child — routing name is the method name | `fn mercury(&self) -> Mercury` |
+/// | `fn NAME(&self, name: &str) -> Option<Child>` (sync or async) | Dynamic fallback dispatcher | `fn planet(&self, name: &str) -> Option<Planet>` |
+///
+/// The enclosing `#[plexus_macros::activation]` macro collects all `#[child]`
+/// methods and generates a `ChildRouter` impl whose `get_child(name)`
+/// dispatches over them. `#[child]` methods are **not** exposed as Plexus RPC
+/// methods — they contribute only to `ChildRouter` routing.
+///
+/// # Example
+///
+/// ```ignore
+/// #[plexus_macros::activation(namespace = "solar")]
+/// impl Solar {
+///     #[plexus_macros::child]
+///     fn mercury(&self) -> Mercury { self.mercury.clone() }
+///
+///     #[plexus_macros::child]
+///     async fn planet(&self, name: &str) -> Option<Planet> {
+///         self.lookup_planet(name).await
+///     }
+/// }
+/// ```
+///
+/// Used standalone (outside an `#[activation]` block) this attribute is a
+/// no-op that returns the function unchanged.
+#[proc_macro_attribute]
+pub fn child(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Outside of #[plexus_macros::activation] this attribute does nothing;
+    // the activation macro strips it and collects the method into the
+    // generated ChildRouter impl.
+    item
+}
+
 fn hub_method_impl(args: HubMethodAttrs, input_fn: ItemFn) -> syn::Result<TokenStream2> {
     // Extract method name (from attr or function name)
     let method_name = args

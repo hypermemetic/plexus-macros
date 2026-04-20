@@ -1,6 +1,6 @@
 //! Generate Activation trait implementation and RPC server
 
-use crate::parse::MethodInfo;
+use crate::parse::{ChildMethodInfo, ChildMethodKind, MethodInfo};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use uuid::Uuid;
@@ -22,6 +22,7 @@ pub fn generate(
     namespace_fn: Option<&str>,
     request_type: Option<&syn::Type>,
     children: &[syn::Ident],
+    child_methods: &[ChildMethodInfo],
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
@@ -236,9 +237,83 @@ pub fn generate(
     };
 
     // Generate ChildRouter::get_child() body.
-    // When `children = [field_a, field_b]` is set, dispatch by field name.
-    // Otherwise return None (leaf activation).
-    let get_child_body = if children.is_empty() {
+    //
+    // Priority:
+    //   1. If `#[child]` methods are present, dispatch via them (CHILD-3).
+    //      Static methods match exact names; a dynamic method (if any)
+    //      handles unmatched names by receiving the name.
+    //   2. Else if `children = [field_a, field_b]` is set (legacy),
+    //      dispatch by field name.
+    //   3. Else return None (leaf activation).
+    //
+    // Note: codegen/mod.rs already errors if both `#[child]` methods and
+    // `children = [...]` are present on the same impl.
+    let get_child_body = if !child_methods.is_empty() {
+        let static_children: Vec<&ChildMethodInfo> = child_methods
+            .iter()
+            .filter(|c| matches!(c.kind, ChildMethodKind::Static))
+            .collect();
+        let dynamic_child: Option<&ChildMethodInfo> = child_methods
+            .iter()
+            .find(|c| matches!(c.kind, ChildMethodKind::Dynamic));
+
+        let static_names: Vec<String> =
+            static_children.iter().map(|c| c.fn_name.to_string()).collect();
+        let static_calls: Vec<TokenStream> = static_children
+            .iter()
+            .map(|c| {
+                let fn_name = &c.fn_name;
+                // Static child methods have shape `fn NAME(&self) -> Child`
+                // which we always call synchronously. (Making static child
+                // methods async would just force an unnecessary `.await`.)
+                quote! {
+                    Some(Box::new(self.#fn_name()) as Box<dyn #crate_path::plexus::ChildRouter>)
+                }
+            })
+            .collect();
+
+        let default_arm = if let Some(dyn_child) = dynamic_child {
+            let fn_name = &dyn_child.fn_name;
+            let await_tok = if dyn_child.is_async {
+                quote! { .await }
+            } else {
+                quote! {}
+            };
+            quote! {
+                _ => self
+                    .#fn_name(_name)
+                    #await_tok
+                    .map(|c| Box::new(c) as Box<dyn #crate_path::plexus::ChildRouter>),
+            }
+        } else {
+            quote! { _ => None, }
+        };
+
+        if static_children.is_empty() {
+            // Pure-dynamic dispatch: no match needed.
+            let fn_name = &dynamic_child.unwrap().fn_name;
+            let await_tok = if dynamic_child.unwrap().is_async {
+                quote! { .await }
+            } else {
+                quote! {}
+            };
+            quote! {
+                self
+                    .#fn_name(_name)
+                    #await_tok
+                    .map(|c| Box::new(c) as Box<dyn #crate_path::plexus::ChildRouter>)
+            }
+        } else {
+            quote! {
+                match _name {
+                    #(
+                        #static_names => #static_calls,
+                    )*
+                    #default_arm
+                }
+            }
+        }
+    } else if children.is_empty() {
         quote! { None }
     } else {
         let child_names: Vec<String> = children.iter().map(|f| f.to_string()).collect();
@@ -280,6 +355,12 @@ pub fn generate(
 
                 async fn get_child(&self, _name: &str) -> Option<Box<dyn #crate_path::plexus::ChildRouter>> {
                     #get_child_body
+                }
+
+                // CHILD-3: emit the opt-in capability declaration explicitly.
+                // List/search are off by default; CHILD-4 will wire opt-in.
+                fn capabilities(&self) -> #crate_path::plexus::ChildCapabilities {
+                    #crate_path::plexus::ChildCapabilities::empty()
                 }
             }
         }

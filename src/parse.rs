@@ -374,6 +374,138 @@ pub struct ActivationParamInfo {
     pub ty: Type,
 }
 
+/// The kind of child-dispatch a `#[child]`-annotated method participates in.
+#[derive(Debug, Clone)]
+pub enum ChildMethodKind {
+    /// `fn NAME(&self) -> Child` — a named static child whose routing name
+    /// is the method identifier.
+    Static,
+    /// `fn NAME(&self, name: &str) -> Option<Child>` — a fallback dispatcher
+    /// that receives every name not matched by a static child.
+    Dynamic,
+}
+
+/// Information extracted from a `#[plexus_macros::child]`-annotated method.
+#[derive(Debug, Clone)]
+pub struct ChildMethodInfo {
+    /// The function identifier (used as routing name for static children).
+    pub fn_name: syn::Ident,
+    /// Doc-comment-derived description. Currently unused for codegen but
+    /// threaded through so future tickets (CHILD-4) can project it into
+    /// child listings/schemas.
+    #[allow(dead_code)]
+    pub description: String,
+    /// Whether this is a static (no-arg) or dynamic (name: &str) child method.
+    pub kind: ChildMethodKind,
+    /// Whether the method is `async fn` — the generated dispatcher awaits it.
+    pub is_async: bool,
+}
+
+impl ChildMethodInfo {
+    /// Build a `ChildMethodInfo` from an impl-block method. Validates the
+    /// signature and returns a `syn::Error` with the phrase
+    /// `child method signature` for any unsupported shape.
+    pub fn from_fn(method: &ImplItemFn) -> syn::Result<Self> {
+        let fn_name = method.sig.ident.clone();
+        let is_async = method.sig.asyncness.is_some();
+        let description = extract_doc_description(&method.attrs).unwrap_or_default();
+
+        // Collect non-self typed parameters.
+        let mut typed_params: Vec<&syn::PatType> = Vec::new();
+        let mut has_receiver = false;
+        for arg in &method.sig.inputs {
+            match arg {
+                FnArg::Receiver(_) => has_receiver = true,
+                FnArg::Typed(pt) => typed_params.push(pt),
+            }
+        }
+
+        if !has_receiver {
+            return Err(syn::Error::new_spanned(
+                &method.sig,
+                "unsupported child method signature: a #[child] method must take `&self` \
+                 (shapes: `fn NAME(&self) -> Child` or `fn NAME(&self, name: &str) -> Option<Child>`)",
+            ));
+        }
+
+        let kind = match typed_params.len() {
+            0 => ChildMethodKind::Static,
+            1 => {
+                // Must be a parameter of type `&str`.
+                let pt = typed_params[0];
+                if !is_str_ref(&pt.ty) {
+                    return Err(syn::Error::new_spanned(
+                        &pt.ty,
+                        "unsupported child method signature: the single parameter of a dynamic \
+                         #[child] method must be `name: &str` \
+                         (shapes: `fn NAME(&self) -> Child` or `fn NAME(&self, name: &str) -> Option<Child>`)",
+                    ));
+                }
+                ChildMethodKind::Dynamic
+            }
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    &method.sig,
+                    "unsupported child method signature: #[child] methods accept either \
+                     no extra arguments (static child) or a single `name: &str` argument \
+                     (dynamic child)",
+                ));
+            }
+        };
+
+        // Require an explicit return type; the specific trait bounds on the
+        // return value (`ChildRouter + Clone + Send + Sync + 'static`) are
+        // enforced by the generated code, not here — that gives better
+        // error messages pointing at the user's type.
+        if matches!(method.sig.output, ReturnType::Default) {
+            return Err(syn::Error::new_spanned(
+                &method.sig,
+                "unsupported child method signature: a #[child] method must declare a return type \
+                 (either `-> Child` for a static child or `-> Option<Child>` for a dynamic child)",
+            ));
+        }
+
+        Ok(ChildMethodInfo { fn_name, description, kind, is_async })
+    }
+}
+
+/// True if `ty` is exactly `&str` (with any lifetime and no mutability).
+fn is_str_ref(ty: &Type) -> bool {
+    if let Type::Reference(r) = ty {
+        if r.mutability.is_some() {
+            return false;
+        }
+        if let Type::Path(tp) = &*r.elem {
+            if let Some(seg) = tp.path.segments.last() {
+                return seg.ident == "str" && tp.path.segments.len() == 1;
+            }
+        }
+    }
+    false
+}
+
+/// Return `true` if this method has a `#[child]` / `#[plexus_macros::child]`
+/// attribute. Used by the `#[activation]` driver to split child methods from
+/// regular `#[method]` ones before per-method parsing.
+pub fn has_child_attr(method: &ImplItemFn) -> bool {
+    method.attrs.iter().any(|a| {
+        let path = a.path();
+        path.segments
+            .last()
+            .map(|s| s.ident == "child")
+            .unwrap_or(false)
+    })
+}
+
+/// Return `true` if this method has a `#[method]` / `#[hub_method]` /
+/// `#[plexus_macros::method]` attribute.
+pub fn has_method_attr(method: &ImplItemFn) -> bool {
+    method.attrs.iter().any(|a| {
+        let last = a.path().segments.last().map(|s| s.ident.to_string());
+        matches!(last.as_deref(), Some("method") | Some("hub_method"))
+    })
+}
+
 /// Information extracted from a #[hub_method] function
 pub struct MethodInfo {
     pub fn_name: syn::Ident,
