@@ -231,7 +231,9 @@ pub struct HubMethodsAttrs {
     pub description: Option<String>,
     /// Long description (optional, for detailed documentation)
     pub long_description: Option<String>,
-    pub crate_path: String,
+    /// Explicit crate path override. `None` means the default resolver
+    /// (`proc-macro-crate`) should pick the path at codegen time.
+    pub crate_path: Option<String>,
     /// If true, generate resolve_handle that delegates to self.resolve_handle_impl()
     pub resolve_handle: bool,
     /// If true, this activation is a hub with children (calls self.plugin_children())
@@ -259,7 +261,7 @@ impl Parse for HubMethodsAttrs {
         let mut version: Option<String> = None;
         let mut description = None;
         let mut long_description = None;
-        let mut crate_path = "crate".to_string();
+        let mut crate_path: Option<String> = None;
         let mut resolve_handle = false;
         let mut hub = false;
         let mut plugin_id = None;
@@ -308,7 +310,7 @@ impl Parse for HubMethodsAttrs {
                             } else if path.is_ident("long_description") {
                                 long_description = Some(s.value());
                             } else if path.is_ident("crate_path") {
-                                crate_path = s.value();
+                                crate_path = Some(s.value());
                             } else if path.is_ident("plugin_id") {
                                 // Validate UUID format
                                 let id_str = s.value();

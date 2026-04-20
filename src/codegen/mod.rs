@@ -4,13 +4,45 @@ mod activation;
 mod method_enum;
 
 use crate::parse::{extract_doc_description, HubMethodAttrs, HubMethodsAttrs, MethodInfo};
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
+use proc_macro_crate::{crate_name, FoundCrate};
 use quote::quote;
 use syn::{FnArg, ImplItem, ItemImpl, Meta, Type};
 
+/// Resolve the `crate_path` to a syn::Path.
+///
+/// If the caller passed `crate_path = "..."` explicitly, parse that string.
+/// Otherwise, call `proc_macro_crate::crate_name("plexus-core")` and emit the
+/// correct path:
+///   - `FoundCrate::Itself`    → `crate`  (code being compiled IS plexus-core)
+///   - `FoundCrate::Name(n)`   → `::<n>`  (external; respects renaming)
+///   - `Err`                   → a compile error naming the missing dependency
+fn resolve_crate_path(explicit: Option<&str>, err_span: Span) -> syn::Result<syn::Path> {
+    if let Some(s) = explicit {
+        return syn::parse_str(s);
+    }
+
+    match crate_name("plexus-core") {
+        Ok(FoundCrate::Itself) => syn::parse_str("crate"),
+        Ok(FoundCrate::Name(name)) => {
+            let ident = syn::Ident::new(&name, err_span);
+            Ok(syn::parse_quote!(::#ident))
+        }
+        Err(e) => Err(syn::Error::new(
+            err_span,
+            format!(
+                "#[plexus_macros::activation] could not locate the `plexus-core` \
+                 dependency in Cargo.toml ({e}). Add `plexus-core` as a dependency, \
+                 or pass `crate_path = \"...\"` explicitly to override."
+            ),
+        )),
+    }
+}
+
 /// Generate all code from a #[hub_methods] impl block
 pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Result<TokenStream> {
-    let crate_path: syn::Path = syn::parse_str(&args.crate_path)?;
+    let crate_path: syn::Path =
+        resolve_crate_path(args.crate_path.as_deref(), Span::call_site())?;
 
     // Get struct name (ident only, for enum naming)
     let struct_name = match &*input_impl.self_ty {

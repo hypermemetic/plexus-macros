@@ -31,6 +31,19 @@ fn activation_request_compile_pass() {
     t.pass("tests/compile/activation_no_request_unchanged.rs");
 }
 
+/// CHILD-6: crate_path auto-resolution via proc-macro-crate and explicit
+/// override behaviour.
+#[test]
+fn activation_crate_path_resolution_compile_pass() {
+    let t = TestCases::new();
+    // Default: no crate_path argument. proc-macro-crate looks up `plexus-core`
+    // in the invoking crate's Cargo.toml.
+    t.pass("tests/compile/activation_crate_path_auto_resolves.rs");
+    // Override: explicit `crate_path = "custom_alias"` wins, even when a
+    // `plexus-core` dep is also available.
+    t.pass("tests/compile/activation_explicit_crate_path_override.rs");
+}
+
 /// REQ-4 type mismatch with activation-level request.
 #[test]
 fn activation_request_compile_fail() {
