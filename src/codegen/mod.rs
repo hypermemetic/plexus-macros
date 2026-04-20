@@ -333,25 +333,14 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         .or_else(|| extract_doc_description(&input_impl.attrs))
         .unwrap_or_default();
 
-    // IR-3: when the macro also synthesizes `plugin_children()` (CHILD-8
-    // inferred hub), static `#[child]` method names appear twice — once as a
-    // `MethodSchema` entry with role `StaticChild`, and once as a
-    // `ChildSummary` entry on the schema. plexus-core's `validate_no_collisions`
-    // panics on that overlap. Until IR-4 drops the `children` side-channel,
-    // we skip the `StaticChild` method entries in that specific case to keep
-    // the schema valid. Dynamic children never appear in `plugin_children()`
-    // so they're always emitted. Hubs that hand-write `plugin_children()`
-    // (which suppresses synthesis) still get `StaticChild` method entries so
-    // consumers can opt into the role-based is_hub_by_role() query.
-    let schema_child_methods: Vec<ChildMethodInfo> = if synthesize_plugin_children {
-        child_methods
-            .iter()
-            .filter(|c| matches!(c.kind, ChildMethodKind::Dynamic))
-            .cloned()
-            .collect()
-    } else {
-        child_methods.clone()
-    };
+    // IR-10: every `#[child]` method emits a `MethodSchema` entry unconditionally,
+    // regardless of whether `plugin_children()` is hand-written or synthesized
+    // (CHILD-8 inferred hub). IR-4 relaxed plexus-core's `validate_no_collisions`
+    // to recognize that a static-child method and the derived `ChildSummary`
+    // of the same name are the same thing by construction, not a collision.
+    // Downstream consumers (synapse, hub-codegen, any IR reader) see the full
+    // role-tagged method list.
+    let schema_child_methods: Vec<ChildMethodInfo> = child_methods.clone();
 
     // Strip the `#[deprecated]` attribute from the impl block itself so the
     // emitted trait impl doesn't carry it (rustc accepts it but reports
