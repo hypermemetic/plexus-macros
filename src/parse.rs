@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use syn::{
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
+    spanned::Spanned,
     Expr, ExprLit, ExprPath, ExprTuple, FnArg, GenericArgument, ImplItem, ImplItemFn, Lit, Meta,
     MetaList, MetaNameValue, Pat, PathArguments, ReturnType, Token, Type,
 };
@@ -16,6 +17,35 @@ pub struct AuthResolver {
     pub param_name: syn::Ident,
     /// The resolver expression (e.g. `self.db.validate_user`)
     pub resolver_expr: syn::Expr,
+}
+
+/// The fallback value written into `DeprecationInfo.removed_in` when a method
+/// is tagged with `#[deprecated]` but neither supplies a `removed_in` key
+/// (which rustc ignores) nor a companion `#[plexus_macros::removed_in("X")]`
+/// attribute.
+///
+/// Matches the ticket IR-3 specification (Context table, row "None +
+/// `#[deprecated(...)]`"): `removed_in: "unspecified"`.
+pub(crate) const DEPRECATION_REMOVED_IN_UNSPECIFIED: &str = "unspecified";
+
+/// Parsed `DeprecationInfo` assembled from a method's `#[deprecated(...)]` and
+/// `#[plexus_macros::removed_in("X")]` attributes.
+///
+/// Fields mirror `plexus_core::plexus::DeprecationInfo` — the codegen layer
+/// translates this into a `MethodSchema.deprecation = Some(DeprecationInfo { .. })`
+/// initializer.
+#[derive(Debug, Clone)]
+pub struct ParsedDeprecation {
+    /// Version at which deprecation began (`since` on `#[deprecated]`, or
+    /// empty string if omitted).
+    pub since: String,
+    /// Planned removal version. Sourced from either `#[plexus_macros::removed_in("X")]`
+    /// or a `removed_in = "X"` key inside `#[deprecated(...)]` (rustc ignores
+    /// the latter; we don't). Falls back to
+    /// `DEPRECATION_REMOVED_IN_UNSPECIFIED` when neither is supplied.
+    pub removed_in: String,
+    /// Migration guidance (`note` on `#[deprecated]`, or empty string).
+    pub message: String,
 }
 
 /// Bidirectional channel type configuration
@@ -406,6 +436,9 @@ pub struct ChildMethodInfo {
     /// sibling method that streams child names matching a query for
     /// `ChildRouter::search_children`.
     pub search_fn: Option<syn::Ident>,
+    /// IR-3: parsed `#[deprecated(...)]` + `#[plexus_macros::removed_in]` info
+    /// folded into the emitted `MethodSchema.deprecation` field.
+    pub deprecation: Option<ParsedDeprecation>,
 }
 
 impl ChildMethodInfo {
@@ -421,6 +454,10 @@ impl ChildMethodInfo {
         // `#[child(...)]` attribute. The attribute itself is the sole carrier
         // of these args — no other attribute recognizes them.
         let (list_fn, search_fn) = parse_child_attr_args(&method.attrs)?;
+
+        // IR-3: capture deprecation metadata from `#[deprecated(...)]` +
+        // `#[plexus_macros::removed_in("X")]` on this child method.
+        let deprecation = parse_deprecation_attrs(&method.attrs, method.sig.span())?;
 
         // Collect non-self typed parameters.
         let mut typed_params: Vec<&syn::PatType> = Vec::new();
@@ -477,7 +514,15 @@ impl ChildMethodInfo {
             ));
         }
 
-        Ok(ChildMethodInfo { fn_name, description, kind, is_async, list_fn, search_fn })
+        Ok(ChildMethodInfo {
+            fn_name,
+            description,
+            kind,
+            is_async,
+            list_fn,
+            search_fn,
+            deprecation,
+        })
     }
 }
 
@@ -823,6 +868,141 @@ fn is_str_ref(ty: &Type) -> bool {
     false
 }
 
+/// Extract `ParsedDeprecation` from an item's attributes by reading
+/// `#[deprecated(...)]` and the companion `#[plexus_macros::removed_in("X")]`.
+///
+/// # Rules (per ticket IR-3)
+///
+/// | Attributes present | Result |
+/// |---|---|
+/// | None | `Ok(None)` |
+/// | `#[deprecated]` (bare) | `Ok(Some(ParsedDeprecation { since: "", removed_in: "unspecified", message: "" }))` |
+/// | `#[deprecated(since = "X", note = "Y")]` | `Ok(Some(ParsedDeprecation { since: "X", removed_in: "unspecified", message: "Y" }))` |
+/// | `#[deprecated(since = "X", note = "Y")]` + `#[plexus_macros::removed_in("Z")]` | `Ok(Some(ParsedDeprecation { since: "X", removed_in: "Z", message: "Y" }))` |
+/// | `#[deprecated(since = "X", note = "Y", removed_in = "Z")]` | `Ok(Some(ParsedDeprecation { since: "X", removed_in: "Z", message: "Y" }))` — rustc warns about the unknown key; we read it |
+/// | `#[plexus_macros::removed_in("Z")]` alone | `Err(..)` — companion without `#[deprecated]` is a compile error |
+///
+/// The `item_span` argument drives the span of the "companion without
+/// `#[deprecated]`" error.
+pub fn parse_deprecation_attrs(
+    attrs: &[syn::Attribute],
+    item_span: proc_macro2::Span,
+) -> syn::Result<Option<ParsedDeprecation>> {
+    let deprecated_attr = attrs.iter().find(|a| a.path().is_ident("deprecated"));
+    let removed_in_attr = attrs.iter().find(|a| {
+        let segs = &a.path().segments;
+        // Accept `#[removed_in(...)]` (imported directly) or the fully-qualified
+        // `#[plexus_macros::removed_in(...)]` form.
+        segs.last()
+            .map(|s| s.ident == "removed_in")
+            .unwrap_or(false)
+    });
+
+    if deprecated_attr.is_none() && removed_in_attr.is_none() {
+        return Ok(None);
+    }
+
+    if deprecated_attr.is_none() {
+        // companion attr present without its required partner
+        return Err(syn::Error::new(
+            removed_in_attr.unwrap().span(),
+            "#[plexus_macros::removed_in(\"...\")] requires a companion \
+             #[deprecated] attribute on the same item — `removed_in` by itself \
+             has no meaning. Add `#[deprecated(since = \"...\", note = \"...\")]` \
+             alongside, or remove the `#[removed_in]` attribute.",
+        ));
+    }
+
+    // Parse the #[deprecated] attribute.
+    let mut since = String::new();
+    let mut message = String::new();
+    let mut removed_in_from_deprecated: Option<String> = None;
+
+    let deprecated_attr = deprecated_attr.unwrap();
+    match &deprecated_attr.meta {
+        // Bare `#[deprecated]` — no args.
+        Meta::Path(_) => {}
+        Meta::List(list) => {
+            // Parse inner args. Each arg should be `key = "value"`.
+            let inner: Punctuated<Meta, Token![,]> =
+                list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
+            for meta in inner {
+                if let Meta::NameValue(MetaNameValue { path, value, .. }) = meta {
+                    if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
+                        if path.is_ident("since") {
+                            since = s.value();
+                        } else if path.is_ident("note") {
+                            message = s.value();
+                        } else if path.is_ident("removed_in") {
+                            // rustc emits a warning about this unrecognized key,
+                            // but we honor the author's intent by reading it.
+                            removed_in_from_deprecated = Some(s.value());
+                        }
+                        // Any other keys are ignored — rustc will warn separately.
+                    }
+                }
+            }
+        }
+        Meta::NameValue(_) => {
+            // `#[deprecated = "msg"]` is the short form — rustc treats `msg`
+            // as the note. We honor the same contract.
+            if let Meta::NameValue(MetaNameValue { value, .. }) = &deprecated_attr.meta {
+                if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
+                    message = s.value();
+                }
+            }
+        }
+    }
+
+    // Parse the companion `#[plexus_macros::removed_in("X")]` if present.
+    let mut removed_in_from_companion: Option<String> = None;
+    if let Some(attr) = removed_in_attr {
+        match &attr.meta {
+            Meta::List(list) => {
+                // Expect a single string literal inside the parens.
+                let s: syn::LitStr = syn::parse2(list.tokens.clone()).map_err(|_| {
+                    syn::Error::new_spanned(
+                        &list.tokens,
+                        "#[plexus_macros::removed_in(\"...\")] expects a single string \
+                         literal argument (e.g. #[plexus_macros::removed_in(\"0.7\")])",
+                    )
+                })?;
+                removed_in_from_companion = Some(s.value());
+            }
+            Meta::NameValue(MetaNameValue { value, .. }) => {
+                // `#[plexus_macros::removed_in = "0.7"]` form.
+                if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
+                    removed_in_from_companion = Some(s.value());
+                } else {
+                    return Err(syn::Error::new_spanned(
+                        value,
+                        "#[plexus_macros::removed_in = \"...\"] expects a string literal",
+                    ));
+                }
+            }
+            Meta::Path(_) => {
+                return Err(syn::Error::new(
+                    attr.span(),
+                    "#[plexus_macros::removed_in] requires an argument (e.g. \
+                     #[plexus_macros::removed_in(\"0.7\")])",
+                ));
+            }
+        }
+    }
+
+    // Precedence: companion > inside-deprecated key > "unspecified" fallback.
+    let removed_in = removed_in_from_companion
+        .or(removed_in_from_deprecated)
+        .unwrap_or_else(|| DEPRECATION_REMOVED_IN_UNSPECIFIED.to_string());
+
+    let _ = item_span; // reserved for future span-derived diagnostics
+    Ok(Some(ParsedDeprecation {
+        since,
+        removed_in,
+        message,
+    }))
+}
+
 /// Return `true` if this method has a `#[child]` / `#[plexus_macros::child]`
 /// attribute. Used by the `#[activation]` driver to split child methods from
 /// regular `#[method]` ones before per-method parsing.
@@ -875,6 +1055,9 @@ pub struct MethodInfo {
     /// Per-method request override. `Some(Skip)` means `request = ()` was set on this method,
     /// which causes the dispatch wrapper to skip activation-level request extraction.
     pub request_override: Option<MethodRequestOverride>,
+    /// IR-3: parsed `#[deprecated(...)]` + `#[plexus_macros::removed_in]` info
+    /// folded into the emitted `MethodSchema.deprecation` field.
+    pub deprecation: Option<ParsedDeprecation>,
 }
 
 impl MethodInfo {
@@ -1015,6 +1198,10 @@ impl MethodInfo {
             ));
         }
 
+        // IR-3: extract deprecation info from the method's attributes (before
+        // codegen strips the `#[plexus_macros::removed_in]` companion).
+        let deprecation = parse_deprecation_attrs(&method.attrs, method.sig.span())?;
+
         Ok(MethodInfo {
             fn_name,
             method_name,
@@ -1030,6 +1217,7 @@ impl MethodInfo {
             auth_resolvers,
             activation_params,
             request_override,
+            deprecation,
         })
     }
 }
@@ -1333,4 +1521,84 @@ fn is_result_plexus_stream(ty: &Type) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proc_macro2::Span;
+    use syn::parse_quote;
+
+    /// Drives `parse_deprecation_attrs` on an inline `removed_in` key inside
+    /// `#[deprecated(...)]`. Stable rustc emits `E0541` for this form, so
+    /// the happy-path integration test in `tests/ir3_role_and_deprecation_tests.rs`
+    /// cannot exercise it end-to-end. This unit test runs the parser directly
+    /// on a synthetic attribute — no rustc attribute-check is involved.
+    #[test]
+    fn parse_deprecation_reads_inline_removed_in_key() {
+        let attrs: Vec<syn::Attribute> =
+            vec![parse_quote! { #[deprecated(since = "0.5", note = "use bar", removed_in = "0.7")] }];
+        let parsed = parse_deprecation_attrs(&attrs, Span::call_site())
+            .expect("parser accepts unknown key")
+            .expect("produces Some for a #[deprecated] attr");
+        assert_eq!(parsed.since, "0.5");
+        assert_eq!(parsed.removed_in, "0.7");
+        assert_eq!(parsed.message, "use bar");
+    }
+
+    /// The companion `#[plexus_macros::removed_in(...)]` takes precedence over
+    /// a `removed_in` key written inside `#[deprecated(...)]`.
+    #[test]
+    fn parse_deprecation_companion_overrides_inline_key() {
+        let attrs: Vec<syn::Attribute> = vec![
+            parse_quote! { #[deprecated(since = "0.5", note = "n", removed_in = "0.7")] },
+            parse_quote! { #[plexus_macros::removed_in("0.9")] },
+        ];
+        let parsed = parse_deprecation_attrs(&attrs, Span::call_site()).unwrap().unwrap();
+        assert_eq!(parsed.removed_in, "0.9");
+    }
+
+    /// `#[deprecated]` without `removed_in` (neither inline nor companion)
+    /// yields the documented fallback string `"unspecified"`.
+    #[test]
+    fn parse_deprecation_fallback_is_unspecified() {
+        let attrs: Vec<syn::Attribute> =
+            vec![parse_quote! { #[deprecated(since = "0.5", note = "n")] }];
+        let parsed = parse_deprecation_attrs(&attrs, Span::call_site()).unwrap().unwrap();
+        assert_eq!(parsed.removed_in, DEPRECATION_REMOVED_IN_UNSPECIFIED);
+    }
+
+    /// Bare `#[deprecated]` (no args) yields empty-string defaults per the
+    /// ticket's "Tests to add" item 3 variant.
+    #[test]
+    fn parse_deprecation_bare_emits_empty_since_and_message() {
+        let attrs: Vec<syn::Attribute> = vec![parse_quote! { #[deprecated] }];
+        let parsed = parse_deprecation_attrs(&attrs, Span::call_site()).unwrap().unwrap();
+        assert_eq!(parsed.since, "");
+        assert_eq!(parsed.message, "");
+        assert_eq!(parsed.removed_in, DEPRECATION_REMOVED_IN_UNSPECIFIED);
+    }
+
+    /// Companion attr without a paired `#[deprecated]` is a compile error.
+    #[test]
+    fn parse_deprecation_companion_without_deprecated_errors() {
+        let attrs: Vec<syn::Attribute> =
+            vec![parse_quote! { #[plexus_macros::removed_in("0.6")] }];
+        let err = parse_deprecation_attrs(&attrs, Span::call_site())
+            .expect_err("removed_in alone must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("#[deprecated]"),
+            "error must name #[deprecated] as required companion; got: {}",
+            msg
+        );
+    }
+
+    /// No deprecation attrs → `Ok(None)`.
+    #[test]
+    fn parse_deprecation_no_attrs_yields_none() {
+        let attrs: Vec<syn::Attribute> = vec![parse_quote! { #[doc = "just a comment"] }];
+        let parsed = parse_deprecation_attrs(&attrs, Span::call_site()).unwrap();
+        assert!(parsed.is_none());
+    }
 }

@@ -87,9 +87,12 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             // invocation.
             if has_child_attr(method) {
                 child_methods.push(ChildMethodInfo::from_fn(method)?);
+                // Strip #[child] and the companion #[plexus_macros::removed_in]
+                // — they're both macro-only markers that rustc does not
+                // otherwise recognize on free-standing methods.
                 method.attrs.retain(|a| {
                     let last = a.path().segments.last().map(|s| s.ident.to_string());
-                    !matches!(last.as_deref(), Some("child"))
+                    !matches!(last.as_deref(), Some("child") | Some("removed_in"))
                 });
                 continue;
             }
@@ -114,6 +117,14 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 };
                 methods.push(MethodInfo::from_fn(method, hub_method_attrs.as_ref())?);
 
+                // Strip #[plexus_macros::removed_in(...)] companion — rustc
+                // doesn't know what to do with it, and the macro has already
+                // folded its value into the `MethodInfo.deprecation` struct.
+                method.attrs.retain(|a| {
+                    let last = a.path().segments.last().map(|s| s.ident.to_string());
+                    !matches!(last.as_deref(), Some("removed_in"))
+                });
+
                 // Strip #[from_auth(...)] and #[activation_param] attributes from parameters
                 // so Rust doesn't complain about unknown attributes in the emitted code.
                 for arg in &mut method.sig.inputs {
@@ -125,6 +136,25 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                     }
                 }
             }
+        }
+    }
+
+    // IR-3: strip any residual `#[plexus_macros::removed_in(...)]` attribute
+    // that landed on a bare (non-#[method], non-#[child]) impl item, or on
+    // the impl block itself — the companion attribute is macro-only and rustc
+    // doesn't know how to handle it. Stripping here is a safety net for
+    // helper functions / impl blocks that the author marked `#[deprecated]`
+    // + `#[removed_in]` alongside a handful of RPC methods.
+    input_impl.attrs.retain(|a| {
+        let last = a.path().segments.last().map(|s| s.ident.to_string());
+        !matches!(last.as_deref(), Some("removed_in"))
+    });
+    for item in &mut input_impl.items {
+        if let ImplItem::Fn(f) = item {
+            f.attrs.retain(|a| {
+                let last = a.path().segments.last().map(|s| s.ident.to_string());
+                !matches!(last.as_deref(), Some("removed_in"))
+            });
         }
     }
 
@@ -268,8 +298,29 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         .or_else(|| extract_doc_description(&input_impl.attrs))
         .unwrap_or_default();
 
+    // IR-3: when the macro also synthesizes `plugin_children()` (CHILD-8
+    // inferred hub), static `#[child]` method names appear twice — once as a
+    // `MethodSchema` entry with role `StaticChild`, and once as a
+    // `ChildSummary` entry on the schema. plexus-core's `validate_no_collisions`
+    // panics on that overlap. Until IR-4 drops the `children` side-channel,
+    // we skip the `StaticChild` method entries in that specific case to keep
+    // the schema valid. Dynamic children never appear in `plugin_children()`
+    // so they're always emitted. Hubs that hand-write `plugin_children()`
+    // (which suppresses synthesis) still get `StaticChild` method entries so
+    // consumers can opt into the role-based is_hub_by_role() query.
+    let schema_child_methods: Vec<ChildMethodInfo> = if synthesize_plugin_children {
+        child_methods
+            .iter()
+            .filter(|c| matches!(c.kind, ChildMethodKind::Dynamic))
+            .cloned()
+            .collect()
+    } else {
+        child_methods.clone()
+    };
+
     // Generate pieces
-    let method_enum = method_enum::generate(&struct_name, &methods, &crate_path);
+    let method_enum =
+        method_enum::generate(&struct_name, &methods, &schema_child_methods, &crate_path);
     let activation_impl = activation::generate(
         &struct_name,
         self_ty,

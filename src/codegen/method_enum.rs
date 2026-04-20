@@ -1,12 +1,17 @@
 //! Generate method enum from hub methods
 
-use crate::parse::{BidirType, MethodInfo};
+use crate::parse::{BidirType, ChildMethodInfo, ChildMethodKind, MethodInfo, ParsedDeprecation};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &syn::Path) -> TokenStream {
+pub fn generate(
+    struct_name: &syn::Ident,
+    methods: &[MethodInfo],
+    child_methods: &[ChildMethodInfo],
+    crate_path: &syn::Path,
+) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
 
     let variants: Vec<TokenStream> = methods
@@ -117,6 +122,33 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                 _ => quote! { #crate_path::plexus::schema::HttpMethod::Post }, // Fallback (should not happen due to validation)
             }
         })
+        .collect();
+
+    // IR-3: per-method deprecation token streams. For methods with no
+    // `#[deprecated]` / `#[plexus_macros::removed_in]` annotation, we emit
+    // nothing (the schema's `deprecation` field defaults to `None`).
+    let (deprecation_index, deprecation_schema_calls): (Vec<_>, Vec<_>) = methods
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, m)| {
+            let idx_lit = proc_macro2::Literal::usize_suffixed(idx);
+            m.deprecation.as_ref().map(|dep| {
+                (
+                    quote! { #idx_lit },
+                    deprecation_call(dep, crate_path),
+                )
+            })
+        })
+        .unzip();
+
+    // IR-3: child-method schema entries. `#[child]` methods are NOT emitted as
+    // RPC variants on the method enum (they don't take an RPC dispatch path),
+    // but they DO contribute `MethodSchema` entries with `role = StaticChild`
+    // / `DynamicChild { .. }` so `PluginSchema::is_hub_by_role()` returns
+    // `true` for hubs whose children are declared via `#[child]`.
+    let child_schema_entries: Vec<TokenStream> = child_methods
+        .iter()
+        .map(|c| child_schema_entry(c, crate_path))
         .collect();
 
     // Generate bidirectional schema setup calls and their method indices.
@@ -294,6 +326,18 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                             _ => {}
                         }
 
+                        // IR-3: apply deprecation metadata per-method. Emitted
+                        // only for methods that carry `#[deprecated]` (see
+                        // `parse_deprecation_attrs` for the contract).
+                        match i {
+                            #(
+                                #deprecation_index => {
+                                    #deprecation_schema_calls
+                                }
+                            )*
+                            _ => {}
+                        }
+
                         schema
                     })
                     .collect::<Vec<_>>();
@@ -305,6 +349,13 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                     "auto_schema".to_string(), // Fixed hash since it's auto-generated
                 );
                 methods.push(schema_method);
+
+                // IR-3: append `#[child]` method entries. Each entry's role is
+                // derived from the child method's signature: no extra arg →
+                // `StaticChild`; `name: &str` arg → `DynamicChild { list_method,
+                // search_method }` with values threaded through from
+                // `#[child(list = "...", search = "...")]`.
+                #(methods.push(#child_schema_entries);)*
 
                 methods
             }
@@ -418,6 +469,87 @@ fn compute_method_hash(method: &MethodInfo) -> String {
     }
 
     format!("{:016x}", hasher.finish())
+}
+
+/// IR-3: generate the `schema = schema.with_deprecation(DeprecationInfo { .. });`
+/// token stream for a method whose `#[deprecated]` / `#[plexus_macros::removed_in]`
+/// attributes have been folded into `ParsedDeprecation`.
+fn deprecation_call(dep: &ParsedDeprecation, crate_path: &syn::Path) -> TokenStream {
+    let since = &dep.since;
+    let removed_in = &dep.removed_in;
+    let message = &dep.message;
+    quote! {
+        schema = schema.with_deprecation(#crate_path::plexus::DeprecationInfo {
+            since: ::std::string::String::from(#since),
+            removed_in: ::std::string::String::from(#removed_in),
+            message: ::std::string::String::from(#message),
+        });
+    }
+}
+
+/// IR-3: build a `MethodSchema::new(name, description, hash).with_role(..)
+/// [.with_deprecation(..)]` expression for a `#[plexus_macros::child]` method.
+///
+/// The generated schema carries just enough metadata for downstream consumers
+/// (synapse CLI, schema introspection) to recognize it as a child-routing
+/// entry — the full RPC-method surface (params, returns, streaming, http_method)
+/// doesn't apply to child methods.
+fn child_schema_entry(child: &ChildMethodInfo, crate_path: &syn::Path) -> TokenStream {
+    let name = child.fn_name.to_string();
+    let description = &child.description;
+
+    // Static children emit `MethodRole::StaticChild`; dynamic children emit
+    // `MethodRole::DynamicChild { list_method, search_method }` with the
+    // optional sibling-method names threaded through from the attribute.
+    let role_expr = match child.kind {
+        ChildMethodKind::Static => quote! { #crate_path::plexus::MethodRole::StaticChild },
+        ChildMethodKind::Dynamic => {
+            let list_expr = match &child.list_fn {
+                Some(ident) => {
+                    let s = ident.to_string();
+                    quote! { ::std::option::Option::Some(::std::string::String::from(#s)) }
+                }
+                None => quote! { ::std::option::Option::None },
+            };
+            let search_expr = match &child.search_fn {
+                Some(ident) => {
+                    let s = ident.to_string();
+                    quote! { ::std::option::Option::Some(::std::string::String::from(#s)) }
+                }
+                None => quote! { ::std::option::Option::None },
+            };
+            quote! {
+                #crate_path::plexus::MethodRole::DynamicChild {
+                    list_method: #list_expr,
+                    search_method: #search_expr,
+                }
+            }
+        }
+    };
+
+    // The `hash` for a child entry is stable w.r.t. the child's routing name;
+    // there's no method signature to hash since these don't carry RPC params.
+    // An empty hash matches the convention used by `plugin_children` synthesis
+    // for `ChildSummary.hash` (see codegen/activation.rs CHILD-8 comments).
+    let deprecation_application = if let Some(dep) = &child.deprecation {
+        let call = deprecation_call(dep, crate_path);
+        quote! { #call }
+    } else {
+        quote! {}
+    };
+
+    quote! {
+        {
+            let mut schema = #crate_path::plexus::MethodSchema::new(
+                ::std::string::String::from(#name),
+                ::std::string::String::from(#description),
+                ::std::string::String::new(),
+            );
+            schema = schema.with_role(#role_expr);
+            #deprecation_application
+            schema
+        }
+    }
 }
 
 /// Check if a type is Option<T>

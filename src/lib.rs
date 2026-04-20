@@ -164,6 +164,43 @@ pub fn child(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Companion attribute to Rust's built-in `#[deprecated]` for carrying a
+/// `removed_in = "VERSION"` hint that rustc doesn't recognize.
+///
+/// Rust's `#[deprecated(since = "X", note = "Y")]` supports only `since` and
+/// `note`. This companion attribute supplies the removal version that the
+/// `plexus-macros` codegen folds into the method's `DeprecationInfo.removed_in`
+/// field on the emitted `MethodSchema`.
+///
+/// # Example
+///
+/// ```ignore
+/// #[deprecated(since = "0.5", note = "use `new_method` instead")]
+/// #[plexus_macros::removed_in("0.6")]
+/// #[plexus_macros::method]
+/// async fn legacy(&self) -> impl Stream<Item = String> + Send + 'static {
+///     // ...
+/// }
+/// ```
+///
+/// # Requirements
+///
+/// `#[plexus_macros::removed_in]` is only meaningful when paired with
+/// `#[deprecated]`. The `#[plexus_macros::activation]` macro emits a compile
+/// error when it encounters `#[removed_in]` on a method that doesn't also
+/// carry `#[deprecated]`.
+///
+/// As a standalone attribute (outside an `#[activation]` block) this is a
+/// no-op that returns the item unchanged — the activation macro parses and
+/// strips it during codegen.
+#[proc_macro_attribute]
+pub fn removed_in(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Outside of #[plexus_macros::activation] this attribute does nothing;
+    // the activation macro parses it off each #[method] / #[child] function
+    // and strips it before emitting the impl block.
+    item
+}
+
 fn hub_method_impl(args: HubMethodAttrs, input_fn: ItemFn) -> syn::Result<TokenStream2> {
     // Extract method name (from attr or function name)
     let method_name = args
