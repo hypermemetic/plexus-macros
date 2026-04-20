@@ -44,6 +44,9 @@ use syn::{
 /// Parsed attributes for hub_method (standalone version)
 struct HubMethodAttrs {
     name: Option<String>,
+    /// Explicit description from `description = "..."`. When `Some`, this wins over
+    /// `///` doc comments. When `None`, doc comments are used as the default.
+    description: Option<String>,
     /// Base crate path for imports (default: "crate")
     crate_path: String,
 }
@@ -51,6 +54,7 @@ struct HubMethodAttrs {
 impl Parse for HubMethodAttrs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut name = None;
+        let mut description: Option<String> = None;
         let mut crate_path = "crate".to_string();
 
         if !input.is_empty() {
@@ -65,6 +69,13 @@ impl Parse for HubMethodAttrs {
                         {
                             name = Some(s.value());
                         }
+                    } else if path.is_ident("description") {
+                        if let Expr::Lit(ExprLit {
+                            lit: Lit::Str(s), ..
+                        }) = value
+                        {
+                            description = Some(s.value());
+                        }
                     } else if path.is_ident("crate_path") {
                         if let Expr::Lit(ExprLit {
                             lit: Lit::Str(s), ..
@@ -77,7 +88,7 @@ impl Parse for HubMethodAttrs {
             }
         }
 
-        Ok(HubMethodAttrs { name, crate_path })
+        Ok(HubMethodAttrs { name, description, crate_path })
     }
 }
 
@@ -119,8 +130,12 @@ fn hub_method_impl(args: HubMethodAttrs, input_fn: ItemFn) -> syn::Result<TokenS
         .name
         .unwrap_or_else(|| input_fn.sig.ident.to_string());
 
-    // Extract description from doc comments
-    let description = extract_doc_comment(&input_fn);
+    // Resolve description: explicit `description = "..."` wins over `///` doc
+    // comments; if neither is present, description is the empty string.
+    let description = match args.description {
+        Some(explicit) => explicit,
+        None => extract_doc_comment(&input_fn),
+    };
 
     // Extract input type from first parameter (if any)
     let input_type = extract_input_type(&input_fn)?;
@@ -155,22 +170,10 @@ fn hub_method_impl(args: HubMethodAttrs, input_fn: ItemFn) -> syn::Result<TokenS
 }
 
 fn extract_doc_comment(input_fn: &ItemFn) -> String {
-    let mut doc_lines = Vec::new();
-
-    for attr in &input_fn.attrs {
-        if attr.path().is_ident("doc") {
-            if let Meta::NameValue(MetaNameValue { value, .. }) = &attr.meta {
-                if let Expr::Lit(ExprLit {
-                    lit: Lit::Str(s), ..
-                }) = value
-                {
-                    doc_lines.push(s.value().trim().to_string());
-                }
-            }
-        }
-    }
-
-    doc_lines.join(" ")
+    // Delegate to the shared helper so the standalone `#[method]` macro path
+    // follows the same doc-comment extraction rule as the in-activation path:
+    // lines joined with '\n', common leading whitespace stripped.
+    parse::extract_doc_description(&input_fn.attrs).unwrap_or_default()
 }
 
 fn extract_input_type(input_fn: &ItemFn) -> syn::Result<Option<Type>> {

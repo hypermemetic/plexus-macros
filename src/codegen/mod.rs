@@ -3,7 +3,7 @@
 mod activation;
 mod method_enum;
 
-use crate::parse::{HubMethodAttrs, HubMethodsAttrs, MethodInfo};
+use crate::parse::{extract_doc_description, HubMethodAttrs, HubMethodsAttrs, MethodInfo};
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{FnArg, ImplItem, ItemImpl, Meta, Type};
@@ -73,6 +73,17 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         ));
     }
 
+    // Resolve the activation description with this precedence:
+    //   1. Explicit `description = "..."` on #[plexus_macros::activation(...)] wins.
+    //   2. Otherwise fall back to `///` doc comments on the impl block, joined with
+    //      '\n' and with common leading whitespace stripped (same rule as `cargo doc`).
+    //   3. If neither is present, description is the empty string.
+    let resolved_description: String = args
+        .description
+        .clone()
+        .or_else(|| extract_doc_description(&input_impl.attrs))
+        .unwrap_or_default();
+
     // Generate pieces
     let method_enum = method_enum::generate(&struct_name, &methods, &crate_path);
     let activation_impl = activation::generate(
@@ -82,7 +93,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         where_clause,
         &args.namespace,
         args.version.as_deref(),
-        args.description.as_deref().unwrap_or(&format!("{} activation", args.namespace)),
+        &resolved_description,
         args.long_description.as_deref(),
         &methods,
         &crate_path,

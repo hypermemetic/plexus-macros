@@ -49,6 +49,10 @@ pub enum MethodRequestOverride {
 /// Parsed attributes for #[hub_method]
 pub struct HubMethodAttrs {
     pub name: Option<String>,
+    /// Explicit description from `description = "..."` attribute argument.
+    /// When `Some`, this wins over `///` doc comments. When `None`, the method's
+    /// doc comments are used as the default description (see `MethodInfo::from_fn`).
+    pub description: Option<String>,
     /// Parameter descriptions: param_name -> description
     pub param_docs: HashMap<String, String>,
     /// Specific enum variants this method can return (for filtered schema generation)
@@ -73,6 +77,7 @@ pub struct HubMethodAttrs {
 impl Parse for HubMethodAttrs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut name = None;
+        let mut description: Option<String> = None;
         let mut param_docs = HashMap::new();
         let mut returns_variants = Vec::new();
         let mut streaming = false;
@@ -107,6 +112,10 @@ impl Parse for HubMethodAttrs {
                         if path.is_ident("name") {
                             if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
                                 name = Some(s.value());
+                            }
+                        } else if path.is_ident("description") {
+                            if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
+                                description = Some(s.value());
                             }
                         } else if path.is_ident("http_method") {
                             if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
@@ -206,7 +215,7 @@ impl Parse for HubMethodAttrs {
             }
         }
 
-        Ok(HubMethodAttrs { name, param_docs, returns_variants, streaming, bidirectional, http_method, request_override })
+        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override })
     }
 }
 
@@ -403,18 +412,15 @@ impl MethodInfo {
             .and_then(|a| a.name.clone())
             .unwrap_or_else(|| fn_name.to_string());
 
-        // Extract doc attributes and description
-        let mut doc_lines = Vec::new();
-        for attr in &method.attrs {
-            if attr.path().is_ident("doc") {
-                if let Meta::NameValue(MetaNameValue { value, .. }) = &attr.meta {
-                    if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
-                        doc_lines.push(s.value().trim().to_string());
-                    }
-                }
-            }
-        }
-        let description = doc_lines.join(" ");
+        // Resolve description with this precedence:
+        //   1. Explicit `description = "..."` on #[plexus_macros::method(...)] wins.
+        //   2. Otherwise fall back to `///` doc comments on the method, joined with '\n'
+        //      and with common leading whitespace stripped (same rule as `cargo doc`).
+        //   3. If neither is present, description is the empty string.
+        let description = match hub_method_attrs.and_then(|a| a.description.clone()) {
+            Some(explicit) => explicit,
+            None => extract_doc_description(&method.attrs).unwrap_or_default(),
+        };
 
         // Get param docs and returns_variants from hub_method attrs
         let param_docs = hub_method_attrs
@@ -769,6 +775,69 @@ fn extract_stream_item_type(ty: &Type) -> Option<Type> {
         }
     }
     None
+}
+
+/// Extract the description from `///` doc comment attributes on an item.
+///
+/// In Rust's AST both `///` doc-comment sugar and the raw `#[doc = "..."]` form appear
+/// as `#[doc = "..."]` attributes, so we read them uniformly here.
+///
+/// Returns:
+/// - `Some(String)` with lines joined by `\n` and common leading whitespace stripped,
+///   matching the standard `cargo doc` rule, when at least one `#[doc = "..."]`
+///   attribute is present.
+/// - `None` when no doc-comment attributes are present on the item. Callers should
+///   treat this as "no default available" and fall back to whatever behavior the
+///   absence of a description should yield (typically the empty string).
+pub(crate) fn extract_doc_description(attrs: &[syn::Attribute]) -> Option<String> {
+    let mut raw_lines: Vec<String> = Vec::new();
+    for attr in attrs {
+        if attr.path().is_ident("doc") {
+            if let Meta::NameValue(MetaNameValue { value, .. }) = &attr.meta {
+                if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
+                    // `///` sugar prepends a single leading space to the literal
+                    // (e.g. `/// Foo` becomes `#[doc = " Foo"]`). The common-leading-
+                    // whitespace strip below removes that uniformly. For multi-line
+                    // raw `#[doc = "a\nb"]` forms, split on '\n' and treat each line
+                    // independently so the strip rule applies per line, not per attr.
+                    for line in s.value().split('\n') {
+                        raw_lines.push(line.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if raw_lines.is_empty() {
+        return None;
+    }
+    Some(strip_common_leading_whitespace(&raw_lines))
+}
+
+/// Strip the common leading-whitespace prefix from every line (the `cargo doc` rule).
+///
+/// - Empty / whitespace-only lines are ignored when computing the common prefix and
+///   emitted as empty strings in the output.
+/// - The minimum count of leading whitespace characters across all non-empty lines
+///   is the common prefix length; that many chars are removed from each non-empty line.
+fn strip_common_leading_whitespace(lines: &[String]) -> String {
+    let min_indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
+        .min()
+        .unwrap_or(0);
+    lines
+        .iter()
+        .map(|l| {
+            if l.trim().is_empty() {
+                String::new()
+            } else {
+                // Skip the first `min_indent` chars (all whitespace by construction).
+                l.chars().skip(min_indent).collect::<String>()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Check if return type looks like Result<PlexusStream, _>
