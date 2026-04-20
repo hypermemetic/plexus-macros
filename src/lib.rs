@@ -194,11 +194,38 @@ pub fn child(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// no-op that returns the item unchanged — the activation macro parses and
 /// strips it during codegen.
 #[proc_macro_attribute]
-pub fn removed_in(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Outside of #[plexus_macros::activation] this attribute does nothing;
-    // the activation macro parses it off each #[method] / #[child] function
-    // and strips it before emitting the impl block.
-    item
+pub fn removed_in(attr: TokenStream, item: TokenStream) -> TokenStream {
+    // When `#[plexus_macros::removed_in("X")]` is placed OUTSIDE
+    // `#[plexus_macros::activation(...)]` on the same impl block, the
+    // `removed_in` proc macro runs BEFORE the activation macro (outer
+    // attrs expand first), so a naive no-op implementation would consume
+    // the attribute before the activation macro ever sees it.
+    //
+    // Workaround: emit a synthetic `#[doc(hidden)]` marker attribute on
+    // the item's attr list that encodes the removed_in value. The
+    // activation / method codegen scans for this marker as an equivalent
+    // signal to the companion attribute and uses it to populate
+    // `DeprecationInfo.removed_in`.
+    //
+    // Stable rustc treats `#[doc(hidden)]` as a regular doc attribute and
+    // the sentinel payload rides along in the same literal string.
+    let attr_str: String = match syn::parse::<syn::LitStr>(attr.clone()) {
+        Ok(s) => s.value(),
+        Err(_) => {
+            // Not a bare string literal — just let the item pass through
+            // and let the activation/method layer produce the proper error.
+            return item;
+        }
+    };
+    let marker = format!("__plexus_removed_in:{}", attr_str);
+    let item_ts: proc_macro2::TokenStream = item.into();
+    let marker_lit = proc_macro2::Literal::string(&marker);
+    let out = quote::quote! {
+        #[doc(hidden)]
+        #[doc = #marker_lit]
+        #item_ts
+    };
+    out.into()
 }
 
 fn hub_method_impl(args: HubMethodAttrs, input_fn: ItemFn) -> syn::Result<TokenStream2> {

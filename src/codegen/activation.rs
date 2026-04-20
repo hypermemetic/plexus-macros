@@ -1,6 +1,8 @@
 //! Generate Activation trait implementation and RPC server
 
-use crate::parse::{ChildMethodInfo, ChildMethodKind, ListSearchMethodInfo, MethodInfo};
+use crate::parse::{
+    ChildMethodInfo, ChildMethodKind, ListSearchMethodInfo, MethodInfo, ParsedDeprecation,
+};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use uuid::Uuid;
@@ -37,6 +39,8 @@ pub fn generate(
     child_methods: &[ChildMethodInfo],
     list_method: Option<&ListSearchMethodInfo>,
     search_method: Option<&ListSearchMethodInfo>,
+    // IR-5: activation-level `#[deprecated]` parsed off the impl block.
+    activation_deprecation: Option<&ParsedDeprecation>,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
@@ -138,6 +142,27 @@ pub fn generate(
         quote! {}
     };
 
+    // IR-5: if the impl block was annotated with `#[deprecated(...)]` the
+    // codegen folded it into `activation_deprecation`. Emit the corresponding
+    // `PluginSchema.deprecation` setter so the schema mirrors the Rust
+    // deprecation at runtime.
+    let deprecation_inject = if let Some(dep) = activation_deprecation {
+        let since = &dep.since;
+        let removed_in = &dep.removed_in;
+        let message = &dep.message;
+        quote! {
+            __plugin_schema.deprecation = ::std::option::Option::Some(
+                #crate_path::plexus::DeprecationInfo {
+                    since: ::std::string::String::from(#since),
+                    removed_in: ::std::string::String::from(#removed_in),
+                    message: ::std::string::String::from(#message),
+                }
+            );
+        }
+    } else {
+        quote! {}
+    };
+
     let plugin_schema_body = match (hub, long_description) {
         (true, Some(long_desc)) => {
             // Hub with long description
@@ -152,6 +177,7 @@ pub fn generate(
                         self.plugin_children(),
                     );
                     #request_schema_inject
+                    #deprecation_inject
                     __plugin_schema
                 }
             }
@@ -168,6 +194,7 @@ pub fn generate(
                         self.plugin_children(),
                     );
                     #request_schema_inject
+                    #deprecation_inject
                     __plugin_schema
                 }
             }
@@ -184,6 +211,7 @@ pub fn generate(
                         #enum_name::method_schemas(),
                     );
                     #request_schema_inject
+                    #deprecation_inject
                     __plugin_schema
                 }
             }
@@ -199,6 +227,7 @@ pub fn generate(
                         #enum_name::method_schemas(),
                     );
                     #request_schema_inject
+                    #deprecation_inject
                     __plugin_schema
                 }
             }

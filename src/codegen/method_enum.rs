@@ -141,6 +141,19 @@ pub fn generate(
         })
         .unzip();
 
+    // IR-5: per-method `params_meta` token streams, carrying per-parameter
+    // deprecation info. Only methods with at least one parameter that has a
+    // non-`None` `ParsedDeprecation` emit a call; the rest leave the default
+    // empty `Vec<ParamSchema>`.
+    let (params_meta_index, params_meta_schema_calls): (Vec<_>, Vec<_>) = methods
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, m)| {
+            let idx_lit = proc_macro2::Literal::usize_suffixed(idx);
+            params_meta_call(m, crate_path).map(|call| (quote! { #idx_lit }, call))
+        })
+        .unzip();
+
     // IR-3: child-method schema entries. `#[child]` methods are NOT emitted as
     // RPC variants on the method enum (they don't take an RPC dispatch path),
     // but they DO contribute `MethodSchema` entries with `role = StaticChild`
@@ -338,6 +351,18 @@ pub fn generate(
                             _ => {}
                         }
 
+                        // IR-5: apply per-parameter deprecation metadata via
+                        // `with_params_meta(..)`. Only methods with at least one
+                        // parameter carrying `#[deprecated]` emit a call.
+                        match i {
+                            #(
+                                #params_meta_index => {
+                                    #params_meta_schema_calls
+                                }
+                            )*
+                            _ => {}
+                        }
+
                         schema
                     })
                     .collect::<Vec<_>>();
@@ -484,6 +509,46 @@ fn deprecation_call(dep: &ParsedDeprecation, crate_path: &syn::Path) -> TokenStr
             removed_in: ::std::string::String::from(#removed_in),
             message: ::std::string::String::from(#message),
         });
+    }
+}
+
+/// IR-5: build the `schema = schema.with_params_meta(vec![ParamSchema { .. }, ..]);`
+/// token stream for a method whose parameters carry per-param `#[deprecated]`
+/// metadata. Returns `None` when no parameter on this method is deprecated —
+/// the emitted schema leaves `params_meta` at its default empty `Vec`.
+fn params_meta_call(m: &MethodInfo, crate_path: &syn::Path) -> Option<TokenStream> {
+    let entries: Vec<TokenStream> = m
+        .params
+        .iter()
+        .filter_map(|p| {
+            let dep = p.deprecation.as_ref()?;
+            let name = p.name.to_string();
+            let since = &dep.since;
+            let removed_in = &dep.removed_in;
+            let message = &dep.message;
+            Some(quote! {
+                #crate_path::plexus::ParamSchema {
+                    name: ::std::string::String::from(#name),
+                    deprecation: ::std::option::Option::Some(
+                        #crate_path::plexus::DeprecationInfo {
+                            since: ::std::string::String::from(#since),
+                            removed_in: ::std::string::String::from(#removed_in),
+                            message: ::std::string::String::from(#message),
+                        }
+                    ),
+                }
+            })
+        })
+        .collect();
+
+    if entries.is_empty() {
+        None
+    } else {
+        Some(quote! {
+            schema = schema.with_params_meta(::std::vec![
+                #(#entries,)*
+            ]);
+        })
     }
 }
 

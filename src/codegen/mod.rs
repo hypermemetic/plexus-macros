@@ -5,13 +5,13 @@ mod method_enum;
 
 use crate::parse::{
     extract_doc_description, find_and_validate_list_search_method, has_child_attr,
-    has_method_attr, ChildMethodInfo, ChildMethodKind, HubMethodAttrs, HubMethodsAttrs,
-    ListSearchKind, ListSearchMethodInfo, MethodInfo,
+    has_method_attr, parse_deprecation_attrs, ChildMethodInfo, ChildMethodKind, HubMethodAttrs,
+    HubMethodsAttrs, ListSearchKind, ListSearchMethodInfo, MethodInfo, ParsedDeprecation,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_crate::{crate_name, FoundCrate};
-use quote::quote;
-use syn::{FnArg, ImplItem, ItemImpl, Meta, Type};
+use quote::{format_ident, quote};
+use syn::{spanned::Spanned, FnArg, ImplItem, ItemImpl, Meta, Type};
 
 /// Resolve the `crate_path` to a syn::Path.
 ///
@@ -125,13 +125,21 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                     !matches!(last.as_deref(), Some("removed_in"))
                 });
 
-                // Strip #[from_auth(...)] and #[activation_param] attributes from parameters
-                // so Rust doesn't complain about unknown attributes in the emitted code.
+                // Strip #[from_auth(...)], #[activation_param], and IR-5's
+                // #[deprecated] / #[plexus_macros::removed_in] attributes from
+                // parameters so rustc doesn't complain about unknown / unused
+                // attributes in the emitted code.
                 for arg in &mut method.sig.inputs {
                     if let FnArg::Typed(pat_type) = arg {
                         pat_type.attrs.retain(|attr| {
+                            let last =
+                                attr.path().segments.last().map(|s| s.ident.to_string());
                             !attr.path().is_ident("from_auth")
                                 && !attr.path().is_ident("activation_param")
+                                && !matches!(
+                                    last.as_deref(),
+                                    Some("deprecated") | Some("removed_in")
+                                )
                         });
                     }
                 }
@@ -139,15 +147,42 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         }
     }
 
-    // IR-3: strip any residual `#[plexus_macros::removed_in(...)]` attribute
-    // that landed on a bare (non-#[method], non-#[child]) impl item, or on
-    // the impl block itself — the companion attribute is macro-only and rustc
-    // doesn't know how to handle it. Stripping here is a safety net for
-    // helper functions / impl blocks that the author marked `#[deprecated]`
-    // + `#[removed_in]` alongside a handful of RPC methods.
+    // IR-5: capture activation-level `#[deprecated]` (+ optional
+    // `#[plexus_macros::removed_in]`) from the impl block's attributes
+    // BEFORE the IR-3 cleanup below strips the `#[removed_in]` companion.
+    // Threads through to `activation::generate` which emits
+    // `PluginSchema.deprecation` when populated.
+    let activation_deprecation: Option<ParsedDeprecation> =
+        parse_deprecation_attrs(&input_impl.attrs, input_impl.span())?;
+
+    // IR-3/IR-5: strip any residual `#[plexus_macros::removed_in(...)]`
+    // attribute that landed on a bare (non-#[method], non-#[child]) impl
+    // item, or on the impl block itself — the companion attribute is
+    // macro-only and rustc doesn't know how to handle it.
+    //
+    // Also strip the IR-5 `#[doc = "__plexus_removed_in:X"]` sentinel that
+    // the outer-expansion path uses to bridge impl-block-level `#[removed_in]`
+    // past its own premature expansion — the activation macro has already
+    // folded it into `activation_deprecation` by now.
     input_impl.attrs.retain(|a| {
         let last = a.path().segments.last().map(|s| s.ident.to_string());
-        !matches!(last.as_deref(), Some("removed_in"))
+        if matches!(last.as_deref(), Some("removed_in")) {
+            return false;
+        }
+        if a.path().is_ident("doc") {
+            if let syn::Meta::NameValue(syn::MetaNameValue { value, .. }) = &a.meta {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = value
+                {
+                    if s.value().starts_with("__plexus_removed_in:") {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     });
     for item in &mut input_impl.items {
         if let ImplItem::Fn(f) = item {
@@ -318,6 +353,21 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         child_methods.clone()
     };
 
+    // Strip the `#[deprecated]` attribute from the impl block itself so the
+    // emitted trait impl doesn't carry it (rustc accepts it but reports
+    // false-positive "use of deprecated ..." warnings inside the generated
+    // code). `#[plexus_macros::removed_in]` is already stripped earlier.
+    input_impl.attrs.retain(|a| !a.path().is_ident("deprecated"));
+
+    // IR-5: deprecation warnings for attribute args `hub` and `children = [...]`.
+    let hub_deprecation_warning =
+        hub_flag_deprecation_warning(args.hub, args.hub_span, &struct_name);
+    let children_deprecation_warning = children_arg_deprecation_warning(
+        !args.children.is_empty(),
+        args.children_span,
+        &struct_name,
+    );
+
     // Generate pieces
     let method_enum =
         method_enum::generate(&struct_name, &methods, &schema_child_methods, &crate_path);
@@ -343,11 +393,100 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         &child_methods,
         list_method.as_ref(),
         search_method.as_ref(),
+        activation_deprecation.as_ref(),
     );
 
     Ok(quote! {
         #input_impl
         #method_enum
         #activation_impl
+        #hub_deprecation_warning
+        #children_deprecation_warning
     })
+}
+
+/// IR-5: emit a compile-time deprecation warning when
+/// `#[plexus_macros::activation(hub)]` is used. Generates a `#[deprecated]`
+/// dummy const and a touch-site that fires rustc's `deprecated` lint
+/// at the span of the flag. Stable-compatible alternative to
+/// `proc_macro::Diagnostic`.
+fn hub_flag_deprecation_warning(
+    hub_is_set: bool,
+    hub_span: Option<Span>,
+    struct_name: &syn::Ident,
+) -> TokenStream {
+    if !hub_is_set {
+        return TokenStream::new();
+    }
+    let span = hub_span.unwrap_or_else(|| struct_name.span());
+    let const_name = format_ident!(
+        "_PLEXUS_MACROS_DEPRECATED_HUB_FLAG_{}",
+        struct_name,
+        span = span
+    );
+    // The trick: declare the deprecated const at module scope, and touch it
+    // from a same-module hidden function. Rustc's `deprecated` lint fires at
+    // the touch site because the function body is NOT inside the const's
+    // own initializer (where the lint is suppressed as a consistency rule).
+    let touch_fn_name = format_ident!(
+        "_plexus_macros_touch_deprecated_hub_flag_{}",
+        struct_name,
+        span = span
+    );
+    quote::quote_spanned! { span =>
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals, non_snake_case, dead_code)]
+        #[deprecated(
+            since = "0.5",
+            note = "plexus-macros: the 'hub' argument is deprecated; hub mode is inferred automatically from #[child]-tagged methods. This argument will be removed in plexus-macros 0.6."
+        )]
+        const #const_name: () = ();
+
+        #[doc(hidden)]
+        #[allow(non_snake_case, dead_code)]
+        fn #touch_fn_name() {
+            // Referencing the deprecated const here fires rustc's
+            // `deprecated` lint, pointing at the span of the `hub` flag.
+            let _ = #const_name;
+        }
+    }
+}
+
+/// IR-5: emit a compile-time deprecation warning when
+/// `#[plexus_macros::activation(children = [...])]` is used. Companion to
+/// `hub_flag_deprecation_warning`; uses the same dummy-const mechanism.
+fn children_arg_deprecation_warning(
+    children_is_set: bool,
+    children_span: Option<Span>,
+    struct_name: &syn::Ident,
+) -> TokenStream {
+    if !children_is_set {
+        return TokenStream::new();
+    }
+    let span = children_span.unwrap_or_else(|| struct_name.span());
+    let const_name = format_ident!(
+        "_PLEXUS_MACROS_DEPRECATED_CHILDREN_ARG_{}",
+        struct_name,
+        span = span
+    );
+    let touch_fn_name = format_ident!(
+        "_plexus_macros_touch_deprecated_children_arg_{}",
+        struct_name,
+        span = span
+    );
+    quote::quote_spanned! { span =>
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals, non_snake_case, dead_code)]
+        #[deprecated(
+            since = "0.5",
+            note = "plexus-macros: the 'children' attribute argument is deprecated; use #[plexus_macros::child] on the accessor method(s) instead. This argument will be removed in plexus-macros 0.6."
+        )]
+        const #const_name: () = ();
+
+        #[doc(hidden)]
+        #[allow(non_snake_case, dead_code)]
+        fn #touch_fn_name() {
+            let _ = #const_name;
+        }
+    }
 }

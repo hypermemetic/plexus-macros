@@ -268,6 +268,8 @@ pub struct HubMethodsAttrs {
     pub resolve_handle: bool,
     /// If true, this activation is a hub with children (calls self.plugin_children())
     pub hub: bool,
+    /// IR-5: span of the `hub` flag, used to anchor the deprecation warning.
+    pub hub_span: Option<proc_macro2::Span>,
     /// Stable UUID for this plugin instance (for handle routing)
     /// If not provided, a deterministic UUID is generated from namespace
     pub plugin_id: Option<String>,
@@ -283,6 +285,8 @@ pub struct HubMethodsAttrs {
     /// enabling type-safe `parent.child.method` hierarchical routing.
     /// Each ident must match both a struct field name and the child's namespace.
     pub children: Vec<syn::Ident>,
+    /// IR-5: span of the `children = [...]` attribute, for deprecation warning.
+    pub children_span: Option<proc_macro2::Span>,
 }
 
 impl Parse for HubMethodsAttrs {
@@ -294,10 +298,12 @@ impl Parse for HubMethodsAttrs {
         let mut crate_path: Option<String> = None;
         let mut resolve_handle = false;
         let mut hub = false;
+        let mut hub_span: Option<proc_macro2::Span> = None;
         let mut plugin_id = None;
         let mut namespace_fn = None;
         let mut request_type: Option<syn::Type> = None;
         let mut children: Vec<syn::Ident> = Vec::new();
+        let mut children_span: Option<proc_macro2::Span> = None;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -362,6 +368,7 @@ impl Parse for HubMethodsAttrs {
                             resolve_handle = true;
                         } else if path.is_ident("hub") {
                             hub = true;
+                            hub_span = Some(path.span());
                         }
                     }
                     Meta::List(list) => {
@@ -370,6 +377,7 @@ impl Parse for HubMethodsAttrs {
                             let parser = Punctuated::<syn::Ident, Token![,]>::parse_terminated;
                             let idents = syn::parse::Parser::parse2(parser, list.tokens.clone())?;
                             children = idents.into_iter().collect();
+                            children_span = Some(list.path.span());
                         }
                     }
                 }
@@ -383,7 +391,21 @@ impl Parse for HubMethodsAttrs {
             ));
         }
 
-        Ok(HubMethodsAttrs { namespace, version, description, long_description, crate_path, resolve_handle, hub, plugin_id, namespace_fn, request_type, children })
+        Ok(HubMethodsAttrs {
+            namespace,
+            version,
+            description,
+            long_description,
+            crate_path,
+            resolve_handle,
+            hub,
+            hub_span,
+            plugin_id,
+            namespace_fn,
+            request_type,
+            children,
+            children_span,
+        })
     }
 }
 
@@ -392,6 +414,11 @@ pub struct ParamInfo {
     pub name: syn::Ident,
     pub ty: Type,
     pub description: Option<String>,
+    /// IR-5: parsed `#[deprecated(...)]` (+ optional
+    /// `#[plexus_macros::removed_in]`) on this parameter in the method
+    /// signature. Populated into `ParamSchema.deprecation` on the emitted
+    /// `MethodSchema.params_meta` list.
+    pub deprecation: Option<ParsedDeprecation>,
 }
 
 /// A parameter injected from the activation's extracted request struct.
@@ -898,14 +925,39 @@ pub fn parse_deprecation_attrs(
             .unwrap_or(false)
     });
 
-    if deprecated_attr.is_none() && removed_in_attr.is_none() {
+    // IR-5: the `#[plexus_macros::removed_in(..)]` proc macro, when applied
+    // OUTSIDE `#[plexus_macros::activation]` on an impl block, expands FIRST
+    // and consumes itself before the activation macro runs. To bridge the
+    // gap, that proc macro also emits a `#[doc = "__plexus_removed_in:VERSION"]`
+    // sentinel on the item. We scan for the sentinel as an equivalent
+    // signal.
+    let removed_in_from_sentinel: Option<String> = attrs
+        .iter()
+        .filter(|a| a.path().is_ident("doc"))
+        .filter_map(|a| {
+            if let Meta::NameValue(MetaNameValue { value, .. }) = &a.meta {
+                if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
+                    let v = s.value();
+                    if let Some(rest) = v.strip_prefix("__plexus_removed_in:") {
+                        return Some(rest.to_string());
+                    }
+                }
+            }
+            None
+        })
+        .next();
+
+    if deprecated_attr.is_none() && removed_in_attr.is_none() && removed_in_from_sentinel.is_none() {
         return Ok(None);
     }
 
     if deprecated_attr.is_none() {
         // companion attr present without its required partner
+        let err_span = removed_in_attr
+            .map(|a| a.span())
+            .unwrap_or_else(proc_macro2::Span::call_site);
         return Err(syn::Error::new(
-            removed_in_attr.unwrap().span(),
+            err_span,
             "#[plexus_macros::removed_in(\"...\")] requires a companion \
              #[deprecated] attribute on the same item — `removed_in` by itself \
              has no meaning. Add `#[deprecated(since = \"...\", note = \"...\")]` \
@@ -990,8 +1042,12 @@ pub fn parse_deprecation_attrs(
         }
     }
 
-    // Precedence: companion > inside-deprecated key > "unspecified" fallback.
+    // Precedence: companion attribute > sentinel from outer-macro expansion
+    // > inside-deprecated key > "unspecified" fallback. The sentinel carries
+    // the same author intent as the companion; we prefer the real attribute
+    // if both are somehow present.
     let removed_in = removed_in_from_companion
+        .or(removed_in_from_sentinel)
         .or(removed_in_from_deprecated)
         .unwrap_or_else(|| DEPRECATION_REMOVED_IN_UNSPECIFIED.to_string());
 
@@ -1160,10 +1216,15 @@ impl MethodInfo {
                     }
 
                     let description = param_docs.get(&name_str).cloned();
+                    // IR-5: parse `#[deprecated(...)]` + optional
+                    // `#[plexus_macros::removed_in("...")]` on the parameter.
+                    let deprecation =
+                        parse_deprecation_attrs(&pat_type.attrs, pat_type.span())?;
                     params.push(ParamInfo {
                         name,
                         ty: (*pat_type.ty).clone(),
                         description,
+                        deprecation,
                     });
                 }
             }
