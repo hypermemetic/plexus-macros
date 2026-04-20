@@ -214,6 +214,49 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         ));
     }
 
+    // CHILD-8: Mixing the explicit `hub` flag with `#[child]` methods is
+    // ambiguous — both are mechanisms for declaring "this activation is a
+    // hub". Require the user to pick exactly one.
+    if args.hub && !child_methods.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &input_impl,
+            "#[plexus_macros::activation(hub, ...)] cannot be combined with #[plexus_macros::child] \
+             methods — the macro infers hub-mode from the presence of #[child] methods. Remove the \
+             'hub' flag or remove the #[child] methods.",
+        ));
+    }
+
+    // CHILD-8: hub-mode is inferred from either the explicit `hub` flag OR
+    // the presence of any `#[child]` method. Both sources feed into
+    // `call_fallback` / `plugin_schema_body` codegen. The explicit flag is
+    // also threaded through separately so `child_router_impl` can still
+    // recognize the legacy Solar pattern (hand-written router + no `#[child]`).
+    let effective_hub = args.hub || !child_methods.is_empty();
+    let hub_explicit = args.hub;
+
+    // CHILD-8: detect whether the impl already carries a `fn plugin_children(&self)`
+    // so the macro doesn't shadow a user-written one when synthesizing. We scan
+    // for an ImplItem::Fn named `plugin_children` whose first parameter is a
+    // receiver (`&self`). Anything else (same name, different shape) is treated
+    // as "not defined" for synthesis purposes — the user's item compiles as-is
+    // and any collision surfaces as a regular Rust name-clash error.
+    let impl_defines_plugin_children = input_impl.items.iter().any(|item| {
+        if let ImplItem::Fn(f) = item {
+            if f.sig.ident == "plugin_children" {
+                return matches!(f.sig.inputs.first(), Some(FnArg::Receiver(_)));
+            }
+        }
+        false
+    });
+
+    // CHILD-8: synthesize `plugin_children` when at least one `#[child]` method
+    // is present and the impl doesn't already define one. Dynamic `#[child]`
+    // methods are intentionally omitted — a finite `ChildSummary` list isn't
+    // meaningful for an open-ended name set; dynamic children are discoverable
+    // via `ChildRouter::list_children` at runtime when opted in.
+    let synthesize_plugin_children =
+        !child_methods.is_empty() && !impl_defines_plugin_children;
+
     // Resolve the activation description with this precedence:
     //   1. Explicit `description = "..."` on #[plexus_macros::activation(...)] wins.
     //   2. Otherwise fall back to `///` doc comments on the impl block, joined with
@@ -239,7 +282,9 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         &methods,
         &crate_path,
         args.resolve_handle,
-        args.hub,
+        effective_hub,
+        hub_explicit,
+        synthesize_plugin_children,
         args.plugin_id.as_deref(),
         args.namespace_fn.as_deref(),
         args.request_type.as_ref(),

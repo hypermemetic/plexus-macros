@@ -22,6 +22,8 @@ fn child_compile_fail() {
     t.compile_fail("tests/compile/child_and_method_mutually_exclusive.rs");
     t.compile_fail("tests/compile/child_two_dynamic_methods.rs");
     t.compile_fail("tests/compile/child_and_legacy_children_list.rs");
+    // CHILD-8
+    t.compile_fail("tests/compile/child_and_hub_flag_ambiguous.rs");
     // CHILD-4
     t.compile_fail("tests/compile/child_list_not_found.rs");
     t.compile_fail("tests/compile/child_search_not_found.rs");

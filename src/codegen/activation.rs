@@ -17,7 +17,19 @@ pub fn generate(
     methods: &[MethodInfo],
     crate_path: &syn::Path,
     resolve_handle: bool,
+    // CHILD-8: effective hub-mode — true when either `args.hub` is set OR
+    // any `#[child]` method is present. Drives `call_fallback` (nested
+    // routing) and `plugin_schema_body` (hub-shape schema).
     hub: bool,
+    // CHILD-8: only the explicit `hub` flag from the activation attribute.
+    // Used together with `child_methods.is_empty()` to detect the legacy
+    // Solar-pre-migration pattern (`hub` flag + hand-written `ChildRouter`)
+    // where the macro must NOT emit its own `ChildRouter` impl.
+    hub_explicit: bool,
+    // CHILD-8: when true, synthesize a `plugin_children(&self) -> Vec<ChildSummary>`
+    // method from the static `#[child]` entries. Computed in `generate_all`
+    // with knowledge of whether the user already defined one.
+    synthesize_plugin_children: bool,
     plugin_id: Option<&str>,
     namespace_fn: Option<&str>,
     request_type: Option<&syn::Type>,
@@ -450,10 +462,16 @@ pub fn generate(
         quote! {}
     };
 
-    // Hub activations (hub = true, e.g. DynamicHub) manage their own ChildRouter
-    // implementation with custom routing logic. Skip generation for them — they
-    // hand-write the impl. Leaf activations always get the generated one.
-    let child_router_impl = if hub {
+    // Hub activations that use the legacy pattern (explicit `hub` flag with
+    // hand-written `ChildRouter` impl, no `#[child]` methods — e.g. DynamicHub,
+    // Solar-pre-migration) manage their own `ChildRouter` implementation with
+    // custom routing logic. Skip generation only in that case.
+    //
+    // CHILD-8: when `#[child]` methods ARE present, we generate a `ChildRouter`
+    // impl from them even if the activation is hub-mode — that's the whole
+    // point of the attribute. Without this, a purely-`#[child]`-based hub
+    // would have no router.
+    let child_router_impl = if hub_explicit && child_methods.is_empty() {
         quote! {}
     } else {
         quote! {
@@ -492,6 +510,49 @@ pub fn generate(
         }
     };
 
+    // CHILD-8: synthesize `plugin_children(&self) -> Vec<ChildSummary>` from
+    // the static `#[child]` methods when the user hasn't defined one. Dynamic
+    // `#[child]` methods are intentionally omitted — an open-ended name set
+    // has no meaningful finite summary list; dynamic children are discoverable
+    // via `ChildRouter::list_children` at runtime.
+    //
+    // The `hash` field of `ChildSummary` is populated with the empty string —
+    // the macro has no compile-time hash source for the child plugin's schema.
+    // Callers that need a populated hash hand-write `plugin_children` (which
+    // suppresses synthesis) and compute the hash from the child's schema.
+    let plugin_children_synth = if synthesize_plugin_children {
+        let static_children: Vec<&ChildMethodInfo> = child_methods
+            .iter()
+            .filter(|c| matches!(c.kind, ChildMethodKind::Static))
+            .collect();
+        let entries: Vec<TokenStream> = static_children
+            .iter()
+            .map(|c| {
+                let name = c.fn_name.to_string();
+                let desc = &c.description;
+                quote! {
+                    #crate_path::plexus::ChildSummary {
+                        namespace: ::std::string::String::from(#name),
+                        description: ::std::string::String::from(#desc),
+                        hash: ::std::string::String::new(),
+                    }
+                }
+            })
+            .collect();
+        quote! {
+            /// Auto-generated child summary list from `#[plexus_macros::child]`
+            /// static methods. Dynamic children are not listed here; they are
+            /// enumerable at runtime via `ChildRouter::list_children`.
+            pub fn plugin_children(&self) -> ::std::vec::Vec<#crate_path::plexus::ChildSummary> {
+                ::std::vec![
+                    #(#entries,)*
+                ]
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     quote! {
         impl #struct_name {
             pub const NAMESPACE: &'static str = #namespace;
@@ -502,6 +563,8 @@ pub fn generate(
             pub fn plugin_id(&self) -> uuid::Uuid {
                 Self::PLUGIN_ID
             }
+
+            #plugin_children_synth
         }
 
         #rpc_block
