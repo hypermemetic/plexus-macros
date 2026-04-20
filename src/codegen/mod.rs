@@ -4,8 +4,9 @@ mod activation;
 mod method_enum;
 
 use crate::parse::{
-    extract_doc_description, has_child_attr, has_method_attr, ChildMethodInfo, ChildMethodKind,
-    HubMethodAttrs, HubMethodsAttrs, MethodInfo,
+    extract_doc_description, find_and_validate_list_search_method, has_child_attr,
+    has_method_attr, ChildMethodInfo, ChildMethodKind, HubMethodAttrs, HubMethodsAttrs,
+    ListSearchKind, ListSearchMethodInfo, MethodInfo,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_crate::{crate_name, FoundCrate};
@@ -160,6 +161,52 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         ));
     }
 
+    // CHILD-4: resolve `list = "..."` / `search = "..."` args against the
+    // same-impl sibling methods. Missing names produce `not found in impl`;
+    // signature mismatches produce an error containing `signature mismatch`.
+    let mut list_method: Option<ListSearchMethodInfo> = None;
+    let mut search_method: Option<ListSearchMethodInfo> = None;
+    for child in &child_methods {
+        if let Some(name) = &child.list_fn {
+            let info = find_and_validate_list_search_method(
+                &input_impl.items,
+                name,
+                ListSearchKind::List,
+                &child.fn_name,
+            )?;
+            if list_method.is_some() {
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!(
+                        "duplicate `list = \"{}\"` across #[plexus_macros::child] methods; \
+                         at most one list method per activation impl",
+                        name
+                    ),
+                ));
+            }
+            list_method = Some(info);
+        }
+        if let Some(name) = &child.search_fn {
+            let info = find_and_validate_list_search_method(
+                &input_impl.items,
+                name,
+                ListSearchKind::Search,
+                &child.fn_name,
+            )?;
+            if search_method.is_some() {
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!(
+                        "duplicate `search = \"{}\"` across #[plexus_macros::child] methods; \
+                         at most one search method per activation impl",
+                        name
+                    ),
+                ));
+            }
+            search_method = Some(info);
+        }
+    }
+
     if methods.is_empty() {
         return Err(syn::Error::new_spanned(
             &input_impl,
@@ -198,6 +245,8 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         args.request_type.as_ref(),
         &args.children,
         &child_methods,
+        list_method.as_ref(),
+        search_method.as_ref(),
     );
 
     Ok(quote! {

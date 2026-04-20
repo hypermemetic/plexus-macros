@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use syn::{
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
-    Expr, ExprLit, ExprPath, ExprTuple, FnArg, GenericArgument, ImplItemFn, Lit, Meta, MetaList,
-    MetaNameValue, Pat, PathArguments, ReturnType, Token, Type,
+    Expr, ExprLit, ExprPath, ExprTuple, FnArg, GenericArgument, ImplItem, ImplItemFn, Lit, Meta,
+    MetaList, MetaNameValue, Pat, PathArguments, ReturnType, Token, Type,
 };
 
 /// A parameter resolved from the auth context via an arbitrary expression.
@@ -399,6 +399,13 @@ pub struct ChildMethodInfo {
     pub kind: ChildMethodKind,
     /// Whether the method is `async fn` — the generated dispatcher awaits it.
     pub is_async: bool,
+    /// CHILD-4: when `#[child(list = "METHOD")]` is present, the name of the
+    /// sibling method that streams child names for `ChildRouter::list_children`.
+    pub list_fn: Option<syn::Ident>,
+    /// CHILD-4: when `#[child(search = "METHOD")]` is present, the name of the
+    /// sibling method that streams child names matching a query for
+    /// `ChildRouter::search_children`.
+    pub search_fn: Option<syn::Ident>,
 }
 
 impl ChildMethodInfo {
@@ -409,6 +416,11 @@ impl ChildMethodInfo {
         let fn_name = method.sig.ident.clone();
         let is_async = method.sig.asyncness.is_some();
         let description = extract_doc_description(&method.attrs).unwrap_or_default();
+
+        // CHILD-4: parse `list = "method"` / `search = "method"` args off the
+        // `#[child(...)]` attribute. The attribute itself is the sole carrier
+        // of these args — no other attribute recognizes them.
+        let (list_fn, search_fn) = parse_child_attr_args(&method.attrs)?;
 
         // Collect non-self typed parameters.
         let mut typed_params: Vec<&syn::PatType> = Vec::new();
@@ -465,8 +477,335 @@ impl ChildMethodInfo {
             ));
         }
 
-        Ok(ChildMethodInfo { fn_name, description, kind, is_async })
+        Ok(ChildMethodInfo { fn_name, description, kind, is_async, list_fn, search_fn })
     }
+}
+
+/// Parse the arguments of a `#[child(...)]` / `#[plexus_macros::child(...)]`
+/// attribute. Supported args:
+///
+/// - `list = "method_name"` — links a sibling list method for CHILD-4
+/// - `search = "method_name"` — links a sibling search method for CHILD-4
+///
+/// If the attribute is bare (`#[child]`) both returned values are `None`.
+/// Unknown args are rejected so typos surface early.
+fn parse_child_attr_args(
+    attrs: &[syn::Attribute],
+) -> syn::Result<(Option<syn::Ident>, Option<syn::Ident>)> {
+    let mut list_fn: Option<syn::Ident> = None;
+    let mut search_fn: Option<syn::Ident> = None;
+
+    for attr in attrs {
+        let path = attr.path();
+        let last = path.segments.last().map(|s| s.ident.to_string());
+        if !matches!(last.as_deref(), Some("child")) {
+            continue;
+        }
+
+        match &attr.meta {
+            // Bare `#[child]` — no args, nothing to parse.
+            Meta::Path(_) => {}
+            // `#[child(list = "...", search = "...")]`
+            Meta::List(list) => {
+                let metas = list.parse_args_with(
+                    Punctuated::<Meta, Token![,]>::parse_terminated,
+                )?;
+                for meta in metas {
+                    match meta {
+                        Meta::NameValue(MetaNameValue { path, value, .. }) => {
+                            let ident_key = match path.get_ident() {
+                                Some(id) => id.to_string(),
+                                None => {
+                                    return Err(syn::Error::new_spanned(
+                                        &path,
+                                        "unknown argument to #[plexus_macros::child]; \
+                                         expected `list = \"method\"` or `search = \"method\"`",
+                                    ));
+                                }
+                            };
+                            let s = match value {
+                                Expr::Lit(ExprLit { lit: Lit::Str(ref s), .. }) => s.clone(),
+                                _ => {
+                                    return Err(syn::Error::new_spanned(
+                                        &value,
+                                        format!(
+                                            "#[plexus_macros::child({} = \"...\")] expects a string literal naming a sibling method",
+                                            ident_key
+                                        ),
+                                    ));
+                                }
+                            };
+                            let method_ident = syn::Ident::new(&s.value(), s.span());
+                            match ident_key.as_str() {
+                                "list" => {
+                                    if list_fn.is_some() {
+                                        return Err(syn::Error::new_spanned(
+                                            &s,
+                                            "duplicate `list = \"...\"` argument on #[plexus_macros::child]",
+                                        ));
+                                    }
+                                    list_fn = Some(method_ident);
+                                }
+                                "search" => {
+                                    if search_fn.is_some() {
+                                        return Err(syn::Error::new_spanned(
+                                            &s,
+                                            "duplicate `search = \"...\"` argument on #[plexus_macros::child]",
+                                        ));
+                                    }
+                                    search_fn = Some(method_ident);
+                                }
+                                other => {
+                                    return Err(syn::Error::new_spanned(
+                                        &path,
+                                        format!(
+                                            "unknown argument `{}` to #[plexus_macros::child]; \
+                                             expected `list = \"method\"` or `search = \"method\"`",
+                                            other
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                        other => {
+                            return Err(syn::Error::new_spanned(
+                                other,
+                                "unknown argument to #[plexus_macros::child]; \
+                                 expected `list = \"method\"` or `search = \"method\"`",
+                            ));
+                        }
+                    }
+                }
+            }
+            Meta::NameValue(_) => {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "#[plexus_macros::child = ...] form is not supported; \
+                     use `#[plexus_macros::child]` or `#[plexus_macros::child(list = \"...\", search = \"...\")]`",
+                ));
+            }
+        }
+    }
+
+    Ok((list_fn, search_fn))
+}
+
+/// The stream-return shape of a sibling `list` / `search` method referenced by
+/// `#[child(list = "...")]` / `#[child(search = "...")]`.
+#[derive(Debug, Clone, Copy)]
+pub enum ListSearchReturnShape {
+    /// `-> impl Stream<Item = String> [+ bounds...]`
+    ImplStream,
+    /// `-> BoxStream<'_, String>` (any lifetime; any path tail)
+    BoxStream,
+}
+
+/// Information extracted from a sibling method referenced by
+/// `#[child(list = "...")]` or `#[child(search = "...")]`.
+#[derive(Debug, Clone)]
+pub struct ListSearchMethodInfo {
+    pub fn_name: syn::Ident,
+    pub is_async: bool,
+    #[allow(dead_code)]
+    pub return_shape: ListSearchReturnShape,
+}
+
+/// Enum tagging which kind of list/search method signature we're validating.
+#[derive(Debug, Clone, Copy)]
+pub enum ListSearchKind {
+    /// `(async) fn METHOD(&self) -> Stream<Item = String>` form.
+    List,
+    /// `(async) fn METHOD(&self, query: &str) -> Stream<Item = String>` form.
+    Search,
+}
+
+/// Find a sibling method in `items` by name and validate that its signature
+/// matches the expected `list` / `search` shape. Returns `ListSearchMethodInfo`
+/// on success, or a `syn::Error` with one of:
+///   - `"not found in impl"` when no method of that name exists.
+///   - a signature-mismatch message when parameters / return type don't match.
+pub fn find_and_validate_list_search_method(
+    items: &[ImplItem],
+    name: &syn::Ident,
+    kind: ListSearchKind,
+    attr_owner: &syn::Ident,
+) -> syn::Result<ListSearchMethodInfo> {
+    // Locate the named sibling method.
+    let method: &ImplItemFn = items
+        .iter()
+        .find_map(|it| match it {
+            ImplItem::Fn(f) if f.sig.ident == *name => Some(f),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            syn::Error::new(
+                name.span(),
+                format!(
+                    "method `{}` referenced by #[plexus_macros::child({} = \"{}\")] \
+                     on `{}` not found in impl",
+                    name,
+                    match kind {
+                        ListSearchKind::List => "list",
+                        ListSearchKind::Search => "search",
+                    },
+                    name,
+                    attr_owner,
+                ),
+            )
+        })?;
+
+    // Validate signature: `&self` + extra typed params.
+    let mut has_receiver = false;
+    let mut typed_params: Vec<&syn::PatType> = Vec::new();
+    for arg in method.sig.inputs.iter() {
+        match arg {
+            FnArg::Receiver(_) => has_receiver = true,
+            FnArg::Typed(pt) => typed_params.push(pt),
+        }
+    }
+    if !has_receiver {
+        return Err(syn::Error::new_spanned(
+            &method.sig,
+            format!(
+                "child method signature mismatch: `{}` must take `&self` (expected shape: `(async) fn {}({}) -> impl Stream<Item = String>` or `-> BoxStream<'_, String>`)",
+                name,
+                name,
+                match kind {
+                    ListSearchKind::List => "&self",
+                    ListSearchKind::Search => "&self, query: &str",
+                },
+            ),
+        ));
+    }
+    match kind {
+        ListSearchKind::List => {
+            if !typed_params.is_empty() {
+                return Err(syn::Error::new_spanned(
+                    &method.sig,
+                    format!(
+                        "child method signature mismatch: list method `{}` must take only `&self` (got {} extra parameter{}); expected `(async) fn {}(&self) -> impl Stream<Item = String>` or `-> BoxStream<'_, String>`",
+                        name,
+                        typed_params.len(),
+                        if typed_params.len() == 1 { "" } else { "s" },
+                        name,
+                    ),
+                ));
+            }
+        }
+        ListSearchKind::Search => {
+            if typed_params.len() != 1 {
+                return Err(syn::Error::new_spanned(
+                    &method.sig,
+                    format!(
+                        "child method signature mismatch: search method `{}` must take `&self` and exactly one `query: &str` parameter (got {}); expected `(async) fn {}(&self, query: &str) -> impl Stream<Item = String>` or `-> BoxStream<'_, String>`",
+                        name,
+                        typed_params.len(),
+                        name,
+                    ),
+                ));
+            }
+            if !is_str_ref(&typed_params[0].ty) {
+                return Err(syn::Error::new_spanned(
+                    &typed_params[0].ty,
+                    format!(
+                        "child method signature mismatch: the query parameter of search method `{}` must be `&str`",
+                        name
+                    ),
+                ));
+            }
+        }
+    }
+
+    // Validate return type: accept either `impl Stream<Item = String> [+ bounds]`
+    // or `BoxStream<'_, String>`.
+    let return_ty = match &method.sig.output {
+        ReturnType::Default => {
+            return Err(syn::Error::new_spanned(
+                &method.sig,
+                format!(
+                    "child method signature mismatch: `{}` must declare a return type of \
+                     `impl Stream<Item = String>` or `BoxStream<'_, String>`",
+                    name
+                ),
+            ));
+        }
+        ReturnType::Type(_, ty) => ty.as_ref(),
+    };
+
+    let return_shape = classify_string_stream_return(return_ty).ok_or_else(|| {
+        syn::Error::new_spanned(
+            return_ty,
+            format!(
+                "child method signature mismatch: `{}` must return `impl Stream<Item = String>` or `BoxStream<'_, String>`",
+                name,
+            ),
+        )
+    })?;
+
+    Ok(ListSearchMethodInfo {
+        fn_name: method.sig.ident.clone(),
+        is_async: method.sig.asyncness.is_some(),
+        return_shape,
+    })
+}
+
+/// Classify a return type as one of the accepted `String`-stream shapes, or
+/// `None` if neither. Recognized:
+///   - `impl Stream<Item = String> [+ Bounds]` (any bound order)
+///   - `BoxStream<'a, String>` / `BoxStream<'_, String>` (any path tail of
+///     `BoxStream`, single or double angle-bracket form)
+fn classify_string_stream_return(ty: &Type) -> Option<ListSearchReturnShape> {
+    // Case 1: impl Stream<Item = String> [+ ...]
+    if let Type::ImplTrait(impl_trait) = ty {
+        for bound in &impl_trait.bounds {
+            if let syn::TypeParamBound::Trait(tb) = bound {
+                let last = tb.path.segments.last()?;
+                if last.ident == "Stream" {
+                    if let PathArguments::AngleBracketed(args) = &last.arguments {
+                        for arg in &args.args {
+                            if let GenericArgument::AssocType(at) = arg {
+                                if at.ident == "Item" && type_is_string(&at.ty) {
+                                    return Some(ListSearchReturnShape::ImplStream);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return None;
+    }
+
+    // Case 2: BoxStream<'_, String> — a path type whose last segment is
+    // `BoxStream` with angle-bracketed args including `String` as the item.
+    if let Type::Path(tp) = ty {
+        let last = tp.path.segments.last()?;
+        if last.ident == "BoxStream" {
+            if let PathArguments::AngleBracketed(args) = &last.arguments {
+                // Look for the `String` generic argument (second position,
+                // after the lifetime — though we accept it wherever).
+                for arg in &args.args {
+                    if let GenericArgument::Type(inner) = arg {
+                        if type_is_string(inner) {
+                            return Some(ListSearchReturnShape::BoxStream);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// True if `ty` is plain `String` (no generics, any path tail of that name).
+fn type_is_string(ty: &Type) -> bool {
+    if let Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            return seg.ident == "String" && matches!(seg.arguments, PathArguments::None);
+        }
+    }
+    false
 }
 
 /// True if `ty` is exactly `&str` (with any lifetime and no mutability).

@@ -117,12 +117,16 @@ async fn static_unknown_child_returns_none() {
 }
 
 #[tokio::test]
-async fn generated_router_advertises_no_optional_capabilities() {
+async fn generated_router_advertises_list_when_static_children_present() {
+    // CHILD-4: static children are always listed. An activation that only
+    // declares static `#[child]` methods (no `list = "..."`) implicitly
+    // supports listing — the macro auto-emits a `list_children` override
+    // that streams the method names, and sets `ChildCapabilities::LIST`.
     let hub = StaticOnlySolar {
         mercury: Mercury { tag: "mercury-static" },
         venus: Venus { tag: "venus-static" },
     };
-    assert_eq!(hub.capabilities(), ChildCapabilities::empty());
+    assert_eq!(hub.capabilities(), ChildCapabilities::LIST);
 }
 
 #[tokio::test]

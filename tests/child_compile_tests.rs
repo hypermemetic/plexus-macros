@@ -1,4 +1,4 @@
-//! CHILD-3 compile-fail and compile-pass tests for the
+//! CHILD-3 + CHILD-4 compile-fail and compile-pass tests for the
 //! `#[plexus_macros::child]` attribute.
 //!
 //! Positive fixtures must compile; negative fixtures must produce specific
@@ -22,4 +22,9 @@ fn child_compile_fail() {
     t.compile_fail("tests/compile/child_and_method_mutually_exclusive.rs");
     t.compile_fail("tests/compile/child_two_dynamic_methods.rs");
     t.compile_fail("tests/compile/child_and_legacy_children_list.rs");
+    // CHILD-4
+    t.compile_fail("tests/compile/child_list_not_found.rs");
+    t.compile_fail("tests/compile/child_search_not_found.rs");
+    t.compile_fail("tests/compile/child_list_wrong_signature.rs");
+    t.compile_fail("tests/compile/child_search_wrong_signature.rs");
 }

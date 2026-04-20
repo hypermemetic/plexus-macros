@@ -1,6 +1,6 @@
 //! Generate Activation trait implementation and RPC server
 
-use crate::parse::{ChildMethodInfo, ChildMethodKind, MethodInfo};
+use crate::parse::{ChildMethodInfo, ChildMethodKind, ListSearchMethodInfo, MethodInfo};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use uuid::Uuid;
@@ -23,6 +23,8 @@ pub fn generate(
     request_type: Option<&syn::Type>,
     children: &[syn::Ident],
     child_methods: &[ChildMethodInfo],
+    list_method: Option<&ListSearchMethodInfo>,
+    search_method: Option<&ListSearchMethodInfo>,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
@@ -328,6 +330,126 @@ pub fn generate(
         }
     };
 
+    // CHILD-4: compute capabilities + list/search overrides.
+    //
+    // Capability rules:
+    //   * Static `#[child]` methods are always listed — having any static
+    //     child implies `ChildCapabilities::LIST`.
+    //   * `#[child(list = "METHOD")]` adds `LIST` and delegates to the named
+    //     sibling method (appended to static names when both are present).
+    //   * `#[child(search = "METHOD")]` adds `SEARCH` and delegates to the
+    //     named sibling method.
+    //
+    // Override emission rules:
+    //   * `list_children()` is overridden iff LIST is set (static names or
+    //     a list method, or both).
+    //   * `search_children()` is overridden iff SEARCH is set.
+    let static_children: Vec<&ChildMethodInfo> = child_methods
+        .iter()
+        .filter(|c| matches!(c.kind, ChildMethodKind::Static))
+        .collect();
+    let has_static_children = !static_children.is_empty();
+    let list_enabled = has_static_children || list_method.is_some();
+    let search_enabled = search_method.is_some();
+
+    let capabilities_expr = match (list_enabled, search_enabled) {
+        (false, false) => quote! { #crate_path::plexus::ChildCapabilities::empty() },
+        (true, false) => quote! { #crate_path::plexus::ChildCapabilities::LIST },
+        (false, true) => quote! { #crate_path::plexus::ChildCapabilities::SEARCH },
+        (true, true) => quote! {
+            #crate_path::plexus::ChildCapabilities::LIST | #crate_path::plexus::ChildCapabilities::SEARCH
+        },
+    };
+
+    // Build a stream expression for the static child names (always listed),
+    // and a stream expression for the user-supplied `list = "..."` method (if
+    // any). When both are present they're chained; when only one is, we use
+    // it directly. The final stream is always boxed as `BoxStream<'_, String>`.
+    let static_names_strs: Vec<String> =
+        static_children.iter().map(|c| c.fn_name.to_string()).collect();
+
+    let list_children_impl = if list_enabled {
+        let static_stream_expr = if has_static_children {
+            // Emit `futures::stream::iter([...].into_iter().map(String::from))`.
+            // We use a long-form path to avoid leaking extra imports into user
+            // code.
+            quote! {
+                futures::stream::iter(
+                    [#(#static_names_strs,)*].into_iter().map(::std::string::String::from)
+                )
+            }
+        } else {
+            quote! { futures::stream::empty::<::std::string::String>() }
+        };
+
+        let dynamic_list_expr = if let Some(lm) = list_method {
+            let fn_name = &lm.fn_name;
+            let await_tok = if lm.is_async { quote! { .await } } else { quote! {} };
+            // `.boxed()` works for any `Stream<Item = String> + Send + 'a`.
+            // Calling `.boxed()` on a `BoxStream<'_, String>` is a no-op
+            // rewrap, which is fine.
+            Some(quote! {
+                {
+                    use futures::stream::StreamExt;
+                    self.#fn_name() #await_tok
+                }
+            })
+        } else {
+            None
+        };
+
+        let combined = match (has_static_children, dynamic_list_expr) {
+            (true, Some(dyn_expr)) => {
+                quote! {
+                    {
+                        use futures::stream::StreamExt;
+                        let __static = #static_stream_expr;
+                        let __dyn = #dyn_expr;
+                        __static.chain(__dyn).boxed()
+                    }
+                }
+            }
+            (true, None) => {
+                quote! {
+                    {
+                        use futures::stream::StreamExt;
+                        #static_stream_expr.boxed()
+                    }
+                }
+            }
+            (false, Some(dyn_expr)) => {
+                quote! {
+                    {
+                        use futures::stream::StreamExt;
+                        #dyn_expr.boxed()
+                    }
+                }
+            }
+            (false, None) => unreachable!("list_enabled with no static or dynamic source"),
+        };
+
+        quote! {
+            async fn list_children(&self) -> Option<futures::stream::BoxStream<'_, ::std::string::String>> {
+                Some(#combined)
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let search_children_impl = if let Some(sm) = search_method {
+        let fn_name = &sm.fn_name;
+        let await_tok = if sm.is_async { quote! { .await } } else { quote! {} };
+        quote! {
+            async fn search_children(&self, query: &str) -> Option<futures::stream::BoxStream<'_, ::std::string::String>> {
+                use futures::stream::StreamExt;
+                Some(self.#fn_name(query) #await_tok.boxed())
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     // Hub activations (hub = true, e.g. DynamicHub) manage their own ChildRouter
     // implementation with custom routing logic. Skip generation for them — they
     // hand-write the impl. Leaf activations always get the generated one.
@@ -357,11 +479,15 @@ pub fn generate(
                     #get_child_body
                 }
 
-                // CHILD-3: emit the opt-in capability declaration explicitly.
-                // List/search are off by default; CHILD-4 will wire opt-in.
+                // CHILD-3/4: opt-in capability flags. Static children always
+                // yield LIST; `list = "..."` / `search = "..."` opt in to the
+                // corresponding flag. Otherwise empty.
                 fn capabilities(&self) -> #crate_path::plexus::ChildCapabilities {
-                    #crate_path::plexus::ChildCapabilities::empty()
+                    #capabilities_expr
                 }
+
+                #list_children_impl
+                #search_children_impl
             }
         }
     };
