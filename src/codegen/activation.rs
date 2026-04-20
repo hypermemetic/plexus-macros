@@ -583,7 +583,7 @@ pub fn generate(
     };
 
     quote! {
-        impl #struct_name {
+        impl #impl_generics #self_ty #where_clause {
             pub const NAMESPACE: &'static str = #namespace;
             /// Stable plugin instance ID for handle routing
             pub const PLUGIN_ID: uuid::Uuid = uuid::uuid!(#plugin_id_str);

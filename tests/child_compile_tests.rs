@@ -13,6 +13,9 @@ use trybuild::TestCases;
 fn child_compile_pass() {
     let t = TestCases::new();
     t.pass("tests/compile/child_static_and_dynamic_ok.rs");
+    // IR-20: generic activation with `#[child]` must compile — regression
+    // for the synthesized `plugin_children()` impl block being non-generic.
+    t.pass("tests/compile/ir20_generic_activation_with_child.rs");
 }
 
 #[test]
