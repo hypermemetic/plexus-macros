@@ -3,3 +3,16 @@ error: #[plexus_macros::child] and #[plexus_macros::method] are mutually exclusi
    |
 38 |     async fn mercury(&self) -> impl Stream<Item = Leaf> + Send + 'static {
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated struct `plexus_core::ChildCapabilities`: Use MethodRole::DynamicChild { list_method, search_method } instead. Removed in 0.7.
+  --> tests/compile/child_and_method_mutually_exclusive.rs:10:1
+   |
+10 | / #[plexus_macros::activation(
+11 | |     namespace = "leaf",
+12 | |     version = "1.0.0",
+13 | |     crate_path = "plexus_core"
+14 | | )]
+   | |__^
+   |
+   = note: `#[warn(deprecated)]` on by default
+   = note: this warning originates in the attribute macro `plexus_macros::activation` (in Nightly builds, run with -Z macro-backtrace for more info)

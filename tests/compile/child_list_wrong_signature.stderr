@@ -3,3 +3,16 @@ error: child method signature mismatch: `wrongly_typed` must return `impl Stream
    |
 42 |     fn wrongly_typed(&self) -> impl Stream<Item = u32> + Send + '_ {
    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated struct `plexus_core::ChildCapabilities`: Use MethodRole::DynamicChild { list_method, search_method } instead. Removed in 0.7.
+  --> tests/compile/child_list_wrong_signature.rs:11:1
+   |
+11 | / #[plexus_macros::activation(
+12 | |     namespace = "leaf",
+13 | |     version = "1.0.0",
+14 | |     crate_path = "plexus_core"
+15 | | )]
+   | |__^
+   |
+   = note: `#[warn(deprecated)]` on by default
+   = note: this warning originates in the attribute macro `plexus_macros::activation` (in Nightly builds, run with -Z macro-backtrace for more info)
