@@ -166,15 +166,26 @@ pub fn generate(
     let plugin_schema_body = match (hub, long_description) {
         (true, Some(long_desc)) => {
             // Hub with long description
+            //
+            // IR-16: `self.plugin_children()` is wrapped in an
+            // `#[allow(deprecated)]` block so post-IR-4 activations do not
+            // emit a "use of deprecated method" warning stemming from this
+            // macro-emitted call. The suppression is narrowly scoped to the
+            // macro's own emission — user code outside the macro is
+            // unaffected.
             quote! {
                 {
+                    let __plugin_children = {
+                        #[allow(deprecated)]
+                        self.plugin_children()
+                    };
                     let mut __plugin_schema = #crate_path::plexus::PluginSchema::hub_with_long_description(
                         #namespace_expr,
                         #version_expr,
                         #description,
                         #long_desc,
                         #enum_name::method_schemas(),
-                        self.plugin_children(),
+                        __plugin_children,
                     );
                     #request_schema_inject
                     #deprecation_inject
@@ -184,14 +195,21 @@ pub fn generate(
         }
         (true, None) => {
             // Hub without long description
+            //
+            // IR-16: `self.plugin_children()` wrapped in `#[allow(deprecated)]`
+            // — see comment on the `(true, Some(_))` arm above.
             quote! {
                 {
+                    let __plugin_children = {
+                        #[allow(deprecated)]
+                        self.plugin_children()
+                    };
                     let mut __plugin_schema = #crate_path::plexus::PluginSchema::hub(
                         #namespace_expr,
                         #version_expr,
                         #description,
                         #enum_name::method_schemas(),
-                        self.plugin_children(),
+                        __plugin_children,
                     );
                     #request_schema_inject
                     #deprecation_inject
@@ -529,6 +547,14 @@ pub fn generate(
                 // CHILD-3/4: opt-in capability flags. Static children always
                 // yield LIST; `list = "..."` / `search = "..."` opt in to the
                 // corresponding flag. Otherwise empty.
+                //
+                // IR-16: `#[allow(deprecated)]` on the fn silences warnings
+                // from the return type and the `ChildCapabilities::{empty,
+                // LIST, SEARCH}` references in the body. The suppression is
+                // scoped to this single generated fn; user code elsewhere is
+                // unaffected. Dropped once `ChildCapabilities` is removed in
+                // 0.7.
+                #[allow(deprecated)]
                 fn capabilities(&self) -> #crate_path::plexus::ChildCapabilities {
                     #capabilities_expr
                 }

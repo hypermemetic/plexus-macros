@@ -1,12 +1,3 @@
-warning: use of deprecated struct `plexus_core::ChildCapabilities`: Use MethodRole::DynamicChild { list_method, search_method } instead. Removed in 0.7.
-  --> tests/compile/activation_request_field_type_mismatch.rs:16:1
-   |
-16 | #[plexus_macros::activation(namespace = "test", version = "1.0.0", request = TestRequest, crate_path = "plexus_core")]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: `#[warn(deprecated)]` on by default
-   = note: this warning originates in the attribute macro `plexus_macros::activation` (in Nightly builds, run with -Z macro-backtrace for more info)
-
 error[E0308]: mismatched types
   --> tests/compile/activation_request_field_type_mismatch.rs:16:1
    |
