@@ -687,10 +687,23 @@ pub fn generate(
                     }
                     _ => {
                         // Check for {method}.schema pattern (e.g., "echo.schema")
-                        // Only if the prefix is an actual local method (not a child)
+                        // Only if the prefix is an actual local user method (NOT a
+                        // child-role entry). Child-role methods are listed in
+                        // `plugin_schema.methods` with `role = StaticChild` or
+                        // `DynamicChild { .. }` (CHILD-8 / IR-10); matching them
+                        // here would return a `SchemaResult::Method` when the
+                        // caller actually wants the child's `PluginSchema` via
+                        // `route_to_child` (HF-AUDIT-3 / HF-AUDIT-4).
                         if let Some(method_name) = method.strip_suffix(".schema") {
                             let plugin_schema = self.plugin_schema();
-                            if let Some(m) = plugin_schema.methods.iter().find(|m| m.name == method_name) {
+                            if let Some(m) = plugin_schema.methods.iter().find(|m| {
+                                m.name == method_name
+                                    && !matches!(
+                                        m.role,
+                                        #crate_path::plexus::MethodRole::StaticChild
+                                            | #crate_path::plexus::MethodRole::DynamicChild { .. }
+                                    )
+                            }) {
                                 let result = #crate_path::plexus::SchemaResult::Method(m.clone());
                                 return Ok(#crate_path::plexus::wrap_stream(
                                     futures::stream::once(async move { result }),
@@ -698,7 +711,8 @@ pub fn generate(
                                     vec![#namespace.into()]
                                 ));
                             }
-                            // Not a local method - fall through to child routing
+                            // Not a local user method (child-role entry or no
+                            // match) - fall through to child routing.
                         }
 
                         // For hubs: try routing to child plugin via ChildRouter trait
