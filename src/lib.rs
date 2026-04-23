@@ -1,27 +1,64 @@
-//! Plexus RPC Method Macro
+//! # plexus-macros
 //!
-//! Proc macro for defining Plexus RPC methods where the function signature IS the schema.
+//! Procedural macros for **Plexus RPC** activations. Your Rust function
+//! signature IS the schema — the macros extract method names, parameter
+//! types, return types, doc comments, deprecation metadata, child routing,
+//! and typed request extraction from the source.
 //!
-//! # Example
+//! See the crate-level [`README`](https://github.com/hypermemetic/plexus-macros/blob/main/README.md)
+//! for a comprehensive example covering every option, a deep-dive on
+//! request forwarding (`PlexusRequest` + `request = ...`), and a
+//! per-macro reference.
+//!
+//! # Quick example
 //!
 //! ```ignore
-//! use hub_macro::{hub_methods, hub_method};
+//! use futures::Stream;
+//! use async_stream::stream;
+//! use plexus_macros::PlexusRequest;
 //!
-//! #[hub_methods(namespace = "bash", version = "1.0.0")]
+//! #[derive(PlexusRequest)]
+//! pub struct BashRequest {
+//!     #[from_cookie("access_token")]
+//!     auth_token: String,
+//! }
+//!
+//! pub struct Bash;
+//!
+//! #[plexus_macros::activation(
+//!     namespace = "bash",
+//!     version = "1.0.0",
+//!     description = "Execute bash commands and stream output",
+//!     request = BashRequest,
+//! )]
 //! impl Bash {
-//!     /// Execute a bash command
-//!     #[hub_method]
-//!     async fn execute(&self, command: String) -> impl Stream<Item = BashEvent> {
-//!         // implementation
+//!     /// Execute a bash command and stream output.
+//!     #[plexus_macros::method(streaming)]
+//!     async fn execute(
+//!         &self,
+//!         command: String,
+//!         #[activation_param] auth_token: String,
+//!     ) -> impl Stream<Item = String> + Send + 'static {
+//!         let _ = (command, auth_token);
+//!         stream! { yield "ok".into(); }
 //!     }
 //! }
 //! ```
 //!
-//! The macro extracts:
-//! - Method name from function name
-//! - Description from doc comments
-//! - Input schema from parameter types
-//! - Return type schema from Stream Item type
+//! # Macros at a glance
+//!
+//! | Macro | Purpose |
+//! |---|---|
+//! | `#[plexus_macros::activation]` | Turn an `impl` block into a Plexus RPC activation. |
+//! | `#[plexus_macros::method]` | Mark a method as an RPC endpoint. |
+//! | `#[plexus_macros::child]` | Register a child activation for `ChildRouter` dispatch. |
+//! | `#[plexus_macros::removed_in]` | Companion to `#[deprecated]` carrying the removal version. |
+//! | `#[derive(PlexusRequest)]` | Typed extraction from `RawRequestContext`. |
+//! | `#[derive(HandleEnum)]` | Type-safe handle enums for an activation. |
+//!
+//! Deprecated surfaces kept through 0.5.x (removed in 0.6): `#[hub_methods]`,
+//! `#[hub_method]`, `#[derive(StreamEvent)]`, the `hub` and `children = [...]`
+//! flags on `#[activation]`. See the migration section of the README.
 
 mod codegen;
 mod handle_enum;
