@@ -20,9 +20,116 @@ Everything downstream — generated clients, OpenAPI docs, deprecation warnings 
 
 ---
 
+## Documentation is primary: `///` everywhere
+
+**`///` doc comments are the primary source of every description that reaches the wire.** The macros extract them at expansion time and emit them into `PluginSchema`. Generated clients (TypeScript, Rust, Python) render them as TSDoc / rustdoc / docstrings. Synapse shows them in the CLI tree.
+
+| Where you write `///` | Where it appears on the wire |
+|---|---|
+| On the `impl` block annotated with `#[plexus_macros::activation]` | `PluginSchema.description` |
+| On each `#[plexus_macros::method]` fn | `MethodSchema.description` |
+| On each `#[plexus_macros::child]` fn | `MethodSchema.description` (role: `StaticChild` / `DynamicChild`) |
+| On a struct / enum that derives `JsonSchema` | JSON Schema `description` for that type |
+| On a field of such a struct | JSON Schema `description` for that field |
+| On an enum variant | JSON Schema `description` for that variant |
+
+**Parameters are the only exception** — individual parameter descriptions must use the `params(name = "...", other = "...")` attr on `#[plexus_macros::method]` (Rust has no per-argument doc-comment syntax).
+
+**Precedence** — if both an explicit attr arg and a `///` doc comment are present, the explicit attr arg wins. In practice, prefer `///`; reach for the attr arg only when you need to diverge (e.g., a deliberately terser wire description than the internal Rust docs).
+
+---
+
+## Minimal example — best practices
+
+The smallest realistic activation. Uses `///` for every description, has one method with a `params(...)` attr, and exposes a static `#[plexus_macros::child]` into a nested namespace. **No `description = "..."` attr args anywhere** — the macros pick up doc comments automatically.
+
+```rust,ignore
+use async_stream::stream;
+use futures::Stream;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+/// A message echoed back to the caller.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EchoEvent {
+    /// The message sent back verbatim, along with its length in characters.
+    Echoed {
+        /// The message echoed to the caller.
+        message: String,
+        /// Character count of `message`.
+        length: usize,
+    },
+}
+
+/// Echo service — returns messages verbatim and exposes a nested `stats` child.
+#[derive(Clone)]
+pub struct Echo;
+
+impl Echo {
+    pub const fn new() -> Self { Self }
+}
+
+/// Echo messages back verbatim; nested `stats` child exposes call introspection.
+#[plexus_macros::activation(namespace = "echo", version = "1.0.0")]
+impl Echo {
+    /// Echo the given message back to the caller exactly as received.
+    #[plexus_macros::method(params(message = "The message to echo"))]
+    async fn echo(&self, message: String) -> impl Stream<Item = EchoEvent> + Send + 'static {
+        stream! {
+            let length = message.chars().count();
+            yield EchoEvent::Echoed { message, length };
+        }
+    }
+
+    /// Nested stats child — reached as `echo.stats.<method>`.
+    #[plexus_macros::child]
+    fn stats(&self) -> EchoStats { EchoStats::new() }
+}
+
+/// Call-count introspection for the `echo` service.
+#[derive(Clone, Default)]
+pub struct EchoStats;
+
+impl EchoStats {
+    pub fn new() -> Self { Self }
+}
+
+/// Introspection for the Echo service — invocation counts and timing.
+#[plexus_macros::activation(namespace = "stats", version = "1.0.0")]
+impl EchoStats {
+    /// Return the total number of `echo` calls served since startup.
+    #[plexus_macros::method]
+    async fn total(&self) -> impl Stream<Item = u64> + Send + 'static {
+        stream! { yield 0; }  // placeholder — wire up real state in production
+    }
+}
+```
+
+**What this demonstrates:**
+
+- **`///` on the `impl` block** (line with `#[plexus_macros::activation]`) supplies `PluginSchema.description`. No `description = "..."` attr arg needed.
+- **`///` on each method fn** supplies `MethodSchema.description`. Again, no `description = "..."` attr arg.
+- **`params(message = "...")`** is the only way to document individual params — Rust has no per-argument doc-comment syntax.
+- **`#[plexus_macros::child]` on a zero-arg accessor fn** creates a static child namespace. `synapse lforge echo stats total` routes into the nested activation.
+- **Stream item type derives `JsonSchema`**, so its variant and field `///` doc comments flow through to the wire.
+
+**Synapse invocations:**
+
+```bash
+synapse lforge echo echo --message "hello"      # → Echoed { message: "hello", length: 5 }
+synapse lforge echo stats total                 # → 0
+```
+
+**Upgrade path from this minimal form:** add `params(...)` as more methods gain documented params; add more `#[plexus_macros::child]` accessors for nested namespaces; introduce `#[derive(PlexusRequest)]` + `request = ...` once you need auth / cookies / per-request context; add `#[deprecated]` + `#[plexus_macros::removed_in]` when rotating methods. Each of those is covered in the comprehensive example below.
+
+---
+
 ## Comprehensive example
 
 A single realistic activation that exercises every macro in the crate. Every attribute shown is currently supported on **0.5.x**. Features that are less common are called out inline.
+
+> The example below uses several `description = "..."` attr args explicitly — partly for readability in a reference doc, partly because the comprehensive activation description is the easier way to show the `long_description` companion. **In your own code prefer `///` doc comments** per the [Documentation is primary](#documentation-is-primary--everywhere) section above.
 
 ```rust,ignore
 use async_stream::stream;
